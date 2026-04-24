@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::Arc;
 
-use parley::fontique::{FallbackKey, FamilyId, Language, ScriptExt};
+use parley::fontique::{Blob, FallbackKey, FamilyId, FontInfoOverride, Language, ScriptExt};
 use parley::layout::PositionedLayoutItem;
 use parley::{
     Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight,
@@ -16,6 +16,45 @@ pub struct FontOptions {
     pub family: String,
     pub size: f32,
     pub line_height: Option<f32>,
+    /// Font files registered from application-owned bytes before system font
+    /// fallback is queried. Use this with `include_bytes!` to ship fonts with
+    /// an application.
+    pub bundled_fonts: Vec<BundledFont>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BundledFont {
+    data: Blob<u8>,
+    family_name: Option<String>,
+}
+
+impl BundledFont {
+    /// Registers font data that lives for the duration of the program.
+    ///
+    /// This is the zero-copy path for `include_bytes!("font.ttf")`.
+    pub fn from_static(data: &'static [u8]) -> Self {
+        Self {
+            data: Blob::new(Arc::new(data)),
+            family_name: None,
+        }
+    }
+
+    /// Registers owned font data.
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        Self {
+            data: Blob::from(data),
+            family_name: None,
+        }
+    }
+
+    /// Overrides the family name exposed to Parley for this font.
+    ///
+    /// This is useful for selecting bundled fonts by a stable app-defined name,
+    /// independent of the internal family name in the font file.
+    pub fn with_family_name(mut self, family_name: impl Into<String>) -> Self {
+        self.family_name = Some(family_name.into());
+        self
+    }
 }
 
 impl Default for FontOptions {
@@ -24,7 +63,49 @@ impl Default for FontOptions {
             family: String::from("FiraMono Nerd Font"),
             size: 16.0,
             line_height: None,
+            bundled_fonts: Vec::new(),
         }
+    }
+}
+
+impl FontOptions {
+    pub fn with_bundled_font(mut self, font: BundledFont) -> Self {
+        self.bundled_fonts.push(font);
+        self
+    }
+
+    /// Adds a bundled font from `include_bytes!`-style data.
+    pub fn with_bundled_font_data(self, data: &'static [u8]) -> Self {
+        self.with_bundled_font(BundledFont::from_static(data))
+    }
+
+    pub fn with_family(mut self, family: impl Into<String>) -> Self {
+        self.family = family.into();
+        self
+    }
+
+    /// Adds a bundled font, exposes it under `family_name`, and selects that
+    /// family as the primary font family.
+    pub fn with_bundled_font_family(
+        mut self,
+        family_name: impl Into<String>,
+        data: &'static [u8],
+    ) -> Self {
+        let family_name = family_name.into();
+        self.family = family_name.clone();
+        self.with_bundled_font(BundledFont::from_static(data).with_family_name(family_name))
+    }
+}
+
+impl From<&'static [u8]> for BundledFont {
+    fn from(data: &'static [u8]) -> Self {
+        Self::from_static(data)
+    }
+}
+
+impl From<Vec<u8>> for BundledFont {
+    fn from(data: Vec<u8>) -> Self {
+        Self::from_vec(data)
     }
 }
 
@@ -83,6 +164,7 @@ pub(crate) struct TextSystem {
 impl TextSystem {
     pub fn new(options: FontOptions) -> Self {
         let mut font_cx = FontContext::default();
+        register_bundled_fonts(&mut font_cx, &options.bundled_fonts);
         let fallback_search_families = fallback_search_families(&mut font_cx);
         let mut text = Self {
             font_cx,
@@ -111,6 +193,43 @@ impl TextSystem {
         } else {
             self.shape_text(text.to_owned(), variant)
         }
+    }
+
+    pub fn register_font(&mut self, font: BundledFont) -> usize {
+        let count = register_bundled_font(&mut self.font_cx, &font);
+        if count > 0 {
+            self.options.bundled_fonts.push(font);
+            self.fallback_search_families = fallback_search_families(&mut self.font_cx);
+            self.checked_fallbacks.clear();
+            self.cache.clear();
+            self.metrics = self.measure_metrics();
+        }
+        count
+    }
+
+    pub fn register_font_data(&mut self, data: &'static [u8]) -> usize {
+        self.register_font(BundledFont::from_static(data))
+    }
+
+    pub fn register_font_family(
+        &mut self,
+        family_name: impl Into<String>,
+        data: &'static [u8],
+    ) -> usize {
+        let family_name = family_name.into();
+        let count = self
+            .register_font(BundledFont::from_static(data).with_family_name(family_name.clone()));
+        if count > 0 {
+            self.set_family(family_name);
+        }
+        count
+    }
+
+    pub fn set_family(&mut self, family: impl Into<String>) {
+        self.options.family = family.into();
+        self.families = Arc::from(font_family_stack(&self.options.family));
+        self.cache.clear();
+        self.metrics = self.measure_metrics();
     }
 
     fn shape_char(&mut self, character: char, variant: FontVariant) -> Arc<Layout<()>> {
@@ -317,6 +436,30 @@ impl TextSystem {
     }
 }
 
+fn register_bundled_fonts(font_cx: &mut FontContext, fonts: &[BundledFont]) -> usize {
+    fonts
+        .iter()
+        .map(|font| register_bundled_font(font_cx, font))
+        .sum()
+}
+
+fn register_bundled_font(font_cx: &mut FontContext, font: &BundledFont) -> usize {
+    let override_info = font
+        .family_name
+        .as_deref()
+        .map(|family_name| FontInfoOverride {
+            family_name: Some(family_name),
+            ..FontInfoOverride::default()
+        });
+
+    font_cx
+        .collection
+        .register_fonts(font.data.clone(), override_info)
+        .into_iter()
+        .map(|(_, fonts)| fonts.len())
+        .sum()
+}
+
 impl FontVariant {
     fn from_style(style: TextStyle) -> Self {
         match (style.bold, style.italic) {
@@ -506,5 +649,17 @@ mod tests {
             Some(String::from("zh-Hans-CN"))
         );
         assert_eq!(normalize_locale("C"), None);
+    }
+
+    #[test]
+    fn invalid_bundled_font_data_is_ignored() {
+        let invalid_font = &b"not a font"[..];
+        let mut text = TextSystem::new(
+            FontOptions::default().with_bundled_font_family("Bundled Test Font", invalid_font),
+        );
+        let metrics = text.metrics();
+
+        assert_eq!(text.register_font_data(invalid_font), 0);
+        assert_eq!(text.metrics(), metrics);
     }
 }

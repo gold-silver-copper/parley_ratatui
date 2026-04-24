@@ -20,6 +20,12 @@ bevy = { version = "0.18.1", default-features = true }
 palette = "0.7.6"
 pollster = "0.4.0"
 
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [[example]]
 name = "bevy_texture"
 required-features = []
