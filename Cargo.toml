@@ -23,6 +23,12 @@ naga = { version = "28.0.0", features = ["termcolor"] }
 
 [dev-dependencies]
 bevy = { version = "0.18.1", default-features = true }
+eframe = { version = "0.34.1", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
 palette = "0.7.6"
 pollster = "0.4.0"
 
@@ -38,4 +44,8 @@ required-features = []
 
 [[example]]
 name = "bevy_colors_rgb"
+required-features = []
+
+[[example]]
+name = "egui_resizable"
 required-features = []

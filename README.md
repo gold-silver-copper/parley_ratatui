@@ -46,6 +46,7 @@ During local development in this repository, run the examples with:
 ```sh
 cargo run --example bevy_texture
 cargo run --example bevy_colors_rgb
+cargo run --example egui_resizable
 ```
 
 ## Basic Usage
