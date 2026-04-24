@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 parley = "0.9.0"
 ratatui = { version = "0.30.0", default-features = false }
+swash = "0.2.7"
 unicode-width = "0.2.2"
 vello = "0.8.0"
 # Vello 0.8 uses naga 28; enabling its termcolor feature keeps naga compatible
@@ -16,8 +17,13 @@ naga = { version = "28.0.0", features = ["termcolor"] }
 
 [dev-dependencies]
 bevy = { version = "0.18.1", default-features = true }
+palette = "0.7.6"
 pollster = "0.4.0"
 
 [[example]]
 name = "bevy_texture"
+required-features = []
+
+[[example]]
+name = "bevy_colors_rgb"
 required-features = []
