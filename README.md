@@ -38,7 +38,7 @@ Add the crate to your project:
 
 ```toml
 [dependencies]
-parley_ratatui = "0.1"
+parley_ratatui = "0.2"
 ```
 
 During local development in this repository, run the examples with:
