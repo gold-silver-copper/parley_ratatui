@@ -2,12 +2,13 @@
 name = "parley_ratatui"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "A ratatui backend that shapes text with parley and renders with vello/wgpu."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 ahash = "0.8.12"
+bevy = { version = "0.18.1", optional = true }
 parley = "0.7.0"
 pollster = "0.4.0"
 ratatui = { version = "0.29.0", default-features = false }
@@ -15,5 +16,20 @@ thiserror = "2.0.17"
 unicode-width = "=0.2.0"
 vello = { version = "0.7.0", default-features = false, features = ["wgpu"] }
 
+[features]
+default = []
+bevy = ["dep:bevy"]
+
 [dev-dependencies]
+anyhow = "1.0.102"
 ratatui = { version = "0.29.0", default-features = false, features = ["unstable-widget-ref"] }
+winit = "0.30.13"
+
+[[example]]
+name = "winit_window"
+path = "examples/winit_window.rs"
+
+[[example]]
+name = "bevy_texture"
+path = "examples/bevy_texture.rs"
+required-features = ["bevy"]
