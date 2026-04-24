@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
+description = "Render Ratatui buffers through Parley and Vello into WGPU textures."
+readme = "README.md"
+documentation = "https://docs.rs/parley_ratatui"
+keywords = ["ratatui", "parley", "vello", "terminal", "bevy"]
+categories = ["command-line-interface", "gui", "rendering"]
+exclude = [".DS_Store"]
 
 [dependencies]
 parley = "0.9.0"
