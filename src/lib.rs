@@ -15,7 +15,7 @@ pub use renderer::{
     AsyncTextureReadback, GpuRenderer, RenderError, TerminalRenderer, TextureReadback,
     TextureTarget,
 };
-pub use text::{BundledFont, FontOptions, TextMetrics};
+pub use text::{BundledFont, FontOptions, FontSource, FontStack, TextMetrics};
 
 pub use ratatui;
 pub use vello;

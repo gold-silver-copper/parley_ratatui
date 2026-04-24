@@ -16,6 +16,8 @@ The crate is built around three layers:
 The examples show a Bevy bridge that renders Ratatui UI into an offscreen Vello
 texture, reads that texture back asynchronously, and updates a Bevy `Image`.
 
+![parley_ratatui Bevy texture demo](assets/bevy-texture-demo.webp)
+
 ## Supported Rendering Features
 
 The renderer is designed to preserve terminal rendering correctness for:
@@ -249,22 +251,28 @@ synchronization stall.
 
 ## Font Configuration
 
-`FontOptions` controls the primary font family, size, optional line height, and
-bundled font registration.
+`FontOptions` controls text size, optional line height, and a `FontStack`.
+`FontStack` lets you choose a preferred face for regular, bold, italic, and
+bold-italic text, plus ordered fallback fonts.
 
 ```rust
 let font = FontOptions {
-    family: "JetBrains Mono, Noto Color Emoji".to_string(),
     size: 18.0,
     line_height: None,
-    bundled_fonts: Vec::new(),
+    fonts: FontStack::new("JetBrains Mono")
+        .with_bold("JetBrains Mono Bold")
+        .with_italic("JetBrains Mono Italic")
+        .with_bold_italic("JetBrains Mono Bold Italic")
+        .with_fallback("Noto Sans CJK JP")
+        .with_fallback("Noto Color Emoji"),
 };
 
 let renderer = TerminalRenderer::new(font, Theme::default());
 ```
 
-The family string is parsed as a CSS-style font family list. The renderer also
-appends these generic fallbacks internally:
+Every family string is parsed as a CSS-style font family list, so quoted names
+and comma-separated fallbacks are accepted. The renderer also appends these
+generic fallbacks internally after your explicit fallbacks:
 
 - `ui-monospace`
 - `monospace`
@@ -277,34 +285,65 @@ appends these generic fallbacks internally:
 
 ```rust
 let font = FontOptions::default()
-    .with_family("JetBrains Mono")
-    .with_bundled_font_data(include_bytes!("../assets/FallbackSymbols.ttf"));
+    .with_regular_font("JetBrains Mono")
+    .with_bold_font("JetBrains Mono Bold")
+    .with_italic_font("JetBrains Mono Italic")
+    .with_bold_italic_font("JetBrains Mono Bold Italic")
+    .with_fallback_family("Noto Sans CJK JP")
+    .with_fallback_family("Noto Color Emoji");
 ```
 
 Available helpers:
 
-- `with_family(family)` sets the primary family.
-- `with_bundled_font(font)` registers a `BundledFont`.
-- `with_bundled_font_data(data)` registers `include_bytes!`-style data.
+- `with_font_stack(fonts)` replaces the whole stack.
+- `with_family(family)` and `with_regular_font(font)` set the regular face.
+- `with_bold_font(font)`, `with_italic_font(font)`, and
+  `with_bold_italic_font(font)` set explicit style variants.
+- `with_fallback_font(font)` and `with_fallback_family(family)` append ordered
+  fallback faces used by every variant.
+- `with_bundled_font(font)` and `with_bundled_font_data(data)` append bundled
+  fallback fonts.
 - `with_bundled_font_family(family_name, data)` registers data under
-  `family_name` and selects that family as the primary font.
+  `family_name` and selects it as the regular face.
+
+Each `font` parameter accepts a family name, a `BundledFont`, `include_bytes!`
+data, or owned `Vec<u8>` font data.
 
 ### Bundled Fonts
 
 Use `BundledFont` when you need to ship fonts with your application.
+Bundled variant fonts are registered with the style and weight implied by the
+builder, so a bundled italic TTF can be selected reliably even when its internal
+metadata is incomplete.
 
 ```rust
 use parley_ratatui::{BundledFont, FontOptions};
 
 let font = FontOptions::default()
-    .with_family("App Mono")
-    .with_bundled_font(
+    .with_regular_font(
         BundledFont::from_static(include_bytes!("../assets/AppMono-Regular.ttf"))
             .with_family_name("App Mono"),
-    );
+    )
+    .with_bold_font(
+        BundledFont::from_static(include_bytes!("../assets/AppMono-Bold.ttf"))
+            .with_family_name("App Mono Bold"),
+    )
+    .with_italic_font(
+        BundledFont::from_static(include_bytes!("../assets/AppMono-Italic.ttf"))
+            .with_family_name("App Mono Italic"),
+    )
+    .with_bold_italic_font(
+        BundledFont::from_static(include_bytes!("../assets/AppMono-BoldItalic.ttf"))
+            .with_family_name("App Mono Bold Italic"),
+    )
+    .with_fallback_font(
+        BundledFont::from_static(include_bytes!("../assets/AppSymbols.ttf"))
+            .with_family_name("App Symbols"),
+    )
+    .with_fallback_family("Noto Color Emoji");
 ```
 
-For the common case, use `with_bundled_font_family`:
+For the common single-face case, use `with_bundled_font_family`:
 
 ```rust
 let font = FontOptions::default().with_bundled_font_family(
@@ -313,14 +352,24 @@ let font = FontOptions::default().with_bundled_font_family(
 );
 ```
 
+If you do not need a stable public family name, pass bytes directly. The
+renderer assigns internal names and still records the requested regular, bold,
+italic, or bold-italic metadata.
+
+```rust
+let font = FontOptions::default()
+    .with_regular_font(include_bytes!("../assets/AppMono-Regular.ttf").as_slice())
+    .with_italic_font(include_bytes!("../assets/AppMono-Italic.ttf").as_slice());
+```
+
 `include_bytes!` uses the zero-copy static path. If you load a font file at
-runtime, use `BundledFont::from_vec(bytes)`.
+runtime, use `BundledFont::from_vec(bytes)` or pass the owned `Vec<u8>` directly.
 
 ```rust
 let bytes = std::fs::read("assets/AppMono-Regular.ttf")?;
-let font = FontOptions::default()
-    .with_family("App Mono")
-    .with_bundled_font(BundledFont::from_vec(bytes).with_family_name("App Mono"));
+let font = FontOptions::default().with_regular_font(
+    BundledFont::from_vec(bytes).with_family_name("App Mono"),
+);
 ```
 
 Registering after construction is also supported:
@@ -340,6 +389,16 @@ if count == 0 {
 Runtime registration clears layout caches and recomputes text metrics if at
 least one font was registered.
 
+For broader runtime changes, replace the full stack:
+
+```rust
+renderer.set_font_stack(
+    FontStack::new("Iosevka Term")
+        .with_italic("Iosevka Term Italic")
+        .with_fallback("Noto Color Emoji"),
+);
+```
+
 ### Font Fallback and Unicode
 
 Parley and Fontique handle shaping and fallback. The renderer additionally seeds
@@ -358,7 +417,9 @@ Example:
 
 ```rust
 let font = FontOptions::default()
-    .with_family("App Mono, Noto Sans CJK JP, Noto Color Emoji");
+    .with_regular_font("App Mono")
+    .with_fallback_family("Noto Sans CJK JP")
+    .with_fallback_family("Noto Color Emoji");
 ```
 
 ## Theme and Color Configuration

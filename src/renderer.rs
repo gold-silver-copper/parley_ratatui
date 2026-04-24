@@ -10,7 +10,7 @@ use vello::{AaConfig, Glyph, RenderParams, Renderer, RendererOptions, Scene, wgp
 
 use crate::color::Rgba;
 use crate::color::Theme;
-use crate::text::{BundledFont, FontOptions, TextMetrics, TextStyle, TextSystem};
+use crate::text::{BundledFont, FontOptions, FontStack, TextMetrics, TextStyle, TextSystem};
 
 #[derive(Debug)]
 pub enum RenderError {
@@ -340,6 +340,13 @@ impl TerminalRenderer {
 
     pub fn set_font_family(&mut self, family: impl Into<String>) {
         self.text.set_family(family);
+    }
+
+    /// Replaces the renderer's font variant and fallback stack.
+    ///
+    /// This clears cached layouts and recomputes text metrics.
+    pub fn set_font_stack(&mut self, fonts: FontStack) {
+        self.text.set_font_stack(fonts);
     }
 
     pub fn texture_size_for_buffer(&self, buffer: &Buffer) -> (u32, u32) {

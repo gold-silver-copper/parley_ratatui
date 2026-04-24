@@ -83,7 +83,7 @@ fn main() {
 
 fn setup(world: &mut World) {
     let terminal = Terminal::new(ParleyBackend::new(94, 31)).expect("terminal");
-    let renderer = TerminalRenderer::new(FontOptions::default(), Theme::default());
+    let renderer = TerminalRenderer::new(example_font_options(), Theme::default());
     let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
     let gpu = pollster::block_on(OffscreenGpu::new(width, height));
 
@@ -113,6 +113,18 @@ fn setup(world: &mut World) {
         gpu,
         handle,
     });
+}
+
+fn example_font_options() -> FontOptions {
+    const TERMINAL_FAMILIES: &str = "Menlo, JetBrains Mono, FiraMono Nerd Font";
+
+    FontOptions::default()
+        .with_regular_font(TERMINAL_FAMILIES)
+        .with_bold_font(TERMINAL_FAMILIES)
+        .with_italic_font(TERMINAL_FAMILIES)
+        .with_bold_italic_font(TERMINAL_FAMILIES)
+        .with_fallback_family("Apple Color Emoji, Noto Color Emoji")
+        .with_fallback_family("Noto Sans CJK JP, PingFang SC, Hiragino Sans")
 }
 
 fn update_terminal_texture(

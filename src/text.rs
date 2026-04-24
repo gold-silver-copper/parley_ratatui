@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::Arc;
 
-use parley::fontique::{Blob, FallbackKey, FamilyId, FontInfoOverride, Language, ScriptExt};
+use parley::fontique::{
+    Blob, FallbackKey, FamilyId, FontInfoOverride, FontStyle as FontiqueFontStyle,
+    FontWeight as FontiqueFontWeight, Language, ScriptExt,
+};
 use parley::layout::PositionedLayoutItem;
 use parley::{
     Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight,
@@ -13,15 +16,47 @@ use swash::text::Codepoint as _;
 
 #[derive(Clone, Debug)]
 pub struct FontOptions {
-    pub family: String,
+    /// Font size in physical pixels.
     pub size: f32,
+    /// Optional fixed line height in physical pixels.
     pub line_height: Option<f32>,
-    /// Font files registered from application-owned bytes before system font
-    /// fallback is queried. Use this with `include_bytes!` to ship fonts with
-    /// an application.
-    pub bundled_fonts: Vec<BundledFont>,
+    /// Preferred regular, styled, and fallback fonts.
+    pub fonts: FontStack,
 }
 
+/// Font selection for terminal text.
+///
+/// The regular source is required. Styled sources are optional; when a styled
+/// source is missing, Parley asks the regular family for that style and may use
+/// a matching system face or synthesize the style. Fallbacks are appended to
+/// every variant before generic system fallbacks.
+#[derive(Clone, Debug)]
+pub struct FontStack {
+    /// Preferred source for unstyled text.
+    pub regular: FontSource,
+    /// Preferred source for bold text.
+    pub bold: Option<FontSource>,
+    /// Preferred source for italic text.
+    pub italic: Option<FontSource>,
+    /// Preferred source for bold italic text.
+    pub bold_italic: Option<FontSource>,
+    /// Ordered fallback sources for CJK, emoji, symbols, and private-use glyphs.
+    pub fallbacks: Vec<FontSource>,
+}
+
+/// A font specified either by installed family name or bundled bytes.
+#[derive(Clone, Debug)]
+pub enum FontSource {
+    /// An installed family name or CSS-style comma-separated family list.
+    Family(String),
+    /// Application-provided font bytes.
+    Bundled(BundledFont),
+}
+
+/// Font bytes bundled by the application.
+///
+/// Use [`BundledFont::from_static`] with `include_bytes!` for the zero-copy
+/// static path, or [`BundledFont::from_vec`] for runtime-loaded font files.
 #[derive(Clone, Debug)]
 pub struct BundledFont {
     data: Blob<u8>,
@@ -60,40 +95,138 @@ impl BundledFont {
 impl Default for FontOptions {
     fn default() -> Self {
         Self {
-            family: String::from("FiraMono Nerd Font"),
             size: 16.0,
             line_height: None,
-            bundled_fonts: Vec::new(),
+            fonts: FontStack::default(),
         }
     }
 }
 
 impl FontOptions {
-    pub fn with_bundled_font(mut self, font: BundledFont) -> Self {
-        self.bundled_fonts.push(font);
+    /// Replaces all font variant and fallback choices.
+    pub fn with_font_stack(mut self, fonts: FontStack) -> Self {
+        self.fonts = fonts;
         self
     }
 
-    /// Adds a bundled font from `include_bytes!`-style data.
+    /// Sets the regular font from an installed family name.
+    pub fn with_family(mut self, family: impl Into<String>) -> Self {
+        self.fonts.regular = FontSource::family(family);
+        self
+    }
+
+    /// Sets the regular font from a family name or bundled font source.
+    pub fn with_regular_font(mut self, source: impl Into<FontSource>) -> Self {
+        self.fonts.regular = source.into();
+        self
+    }
+
+    /// Sets the preferred bold font from a family name or bundled font source.
+    pub fn with_bold_font(mut self, source: impl Into<FontSource>) -> Self {
+        self.fonts.bold = Some(source.into());
+        self
+    }
+
+    /// Sets the preferred italic font from a family name or bundled font source.
+    pub fn with_italic_font(mut self, source: impl Into<FontSource>) -> Self {
+        self.fonts.italic = Some(source.into());
+        self
+    }
+
+    /// Sets the preferred bold italic font from a family name or bundled source.
+    pub fn with_bold_italic_font(mut self, source: impl Into<FontSource>) -> Self {
+        self.fonts.bold_italic = Some(source.into());
+        self
+    }
+
+    /// Appends an ordered fallback font used by every style variant.
+    pub fn with_fallback_font(mut self, source: impl Into<FontSource>) -> Self {
+        self.fonts.fallbacks.push(source.into());
+        self
+    }
+
+    /// Appends an installed fallback family used by every style variant.
+    pub fn with_fallback_family(self, family: impl Into<String>) -> Self {
+        self.with_fallback_font(FontSource::family(family))
+    }
+
+    /// Appends a bundled fallback font.
+    pub fn with_bundled_font(mut self, font: BundledFont) -> Self {
+        self.fonts.fallbacks.push(FontSource::Bundled(font));
+        self
+    }
+
+    /// Adds a bundled fallback font from `include_bytes!`-style data.
     pub fn with_bundled_font_data(self, data: &'static [u8]) -> Self {
         self.with_bundled_font(BundledFont::from_static(data))
     }
 
-    pub fn with_family(mut self, family: impl Into<String>) -> Self {
-        self.family = family.into();
-        self
-    }
-
-    /// Adds a bundled font, exposes it under `family_name`, and selects that
-    /// family as the primary font family.
+    /// Adds a bundled regular font, exposes it under `family_name`, and selects
+    /// that family as the primary font family.
     pub fn with_bundled_font_family(
-        mut self,
+        self,
         family_name: impl Into<String>,
         data: &'static [u8],
     ) -> Self {
-        let family_name = family_name.into();
-        self.family = family_name.clone();
-        self.with_bundled_font(BundledFont::from_static(data).with_family_name(family_name))
+        self.with_regular_font(BundledFont::from_static(data).with_family_name(family_name))
+    }
+}
+
+impl Default for FontStack {
+    fn default() -> Self {
+        Self {
+            regular: FontSource::family("FiraMono Nerd Font"),
+            bold: None,
+            italic: None,
+            bold_italic: None,
+            fallbacks: Vec::new(),
+        }
+    }
+}
+
+impl FontStack {
+    /// Creates a stack with a required regular font source.
+    pub fn new(regular: impl Into<FontSource>) -> Self {
+        Self {
+            regular: regular.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Sets the preferred bold font source.
+    pub fn with_bold(mut self, source: impl Into<FontSource>) -> Self {
+        self.bold = Some(source.into());
+        self
+    }
+
+    /// Sets the preferred italic font source.
+    pub fn with_italic(mut self, source: impl Into<FontSource>) -> Self {
+        self.italic = Some(source.into());
+        self
+    }
+
+    /// Sets the preferred bold italic font source.
+    pub fn with_bold_italic(mut self, source: impl Into<FontSource>) -> Self {
+        self.bold_italic = Some(source.into());
+        self
+    }
+
+    /// Appends an ordered fallback font source.
+    pub fn with_fallback(mut self, source: impl Into<FontSource>) -> Self {
+        self.fallbacks.push(source.into());
+        self
+    }
+}
+
+impl FontSource {
+    /// Selects an installed family name or CSS-style family list.
+    pub fn family(family: impl Into<String>) -> Self {
+        Self::Family(family.into())
+    }
+
+    /// Selects bundled font bytes.
+    pub fn bundled(font: impl Into<BundledFont>) -> Self {
+        Self::Bundled(font.into())
     }
 }
 
@@ -106,6 +239,36 @@ impl From<&'static [u8]> for BundledFont {
 impl From<Vec<u8>> for BundledFont {
     fn from(data: Vec<u8>) -> Self {
         Self::from_vec(data)
+    }
+}
+
+impl From<&'static [u8]> for FontSource {
+    fn from(data: &'static [u8]) -> Self {
+        Self::Bundled(BundledFont::from_static(data))
+    }
+}
+
+impl From<Vec<u8>> for FontSource {
+    fn from(data: Vec<u8>) -> Self {
+        Self::Bundled(BundledFont::from_vec(data))
+    }
+}
+
+impl From<BundledFont> for FontSource {
+    fn from(font: BundledFont) -> Self {
+        Self::Bundled(font)
+    }
+}
+
+impl From<&str> for FontSource {
+    fn from(family: &str) -> Self {
+        Self::family(family)
+    }
+}
+
+impl From<String> for FontSource {
+    fn from(family: String) -> Self {
+        Self::Family(family)
     }
 }
 
@@ -148,12 +311,30 @@ struct LayoutKey {
     font_size_bits: u32,
 }
 
+struct VariantFamilyStacks {
+    normal: Arc<[FontFamilyName<'static>]>,
+    bold: Arc<[FontFamilyName<'static>]>,
+    italic: Arc<[FontFamilyName<'static>]>,
+    bold_italic: Arc<[FontFamilyName<'static>]>,
+}
+
+impl VariantFamilyStacks {
+    fn get(&self, variant: FontVariant) -> &[FontFamilyName<'static>] {
+        match variant {
+            FontVariant::Normal => &self.normal,
+            FontVariant::Bold => &self.bold,
+            FontVariant::Italic => &self.italic,
+            FontVariant::BoldItalic => &self.bold_italic,
+        }
+    }
+}
+
 pub(crate) struct TextSystem {
     font_cx: FontContext,
     layout_cx: LayoutContext<()>,
     options: FontOptions,
     metrics: TextMetrics,
-    families: Arc<[FontFamilyName<'static>]>,
+    font_families: VariantFamilyStacks,
     locale: Option<Language>,
     fallback_search_families: Arc<[FamilyId]>,
     checked_fallbacks: HashSet<(FallbackKey, char)>,
@@ -164,12 +345,12 @@ pub(crate) struct TextSystem {
 impl TextSystem {
     pub fn new(options: FontOptions) -> Self {
         let mut font_cx = FontContext::default();
-        register_bundled_fonts(&mut font_cx, &options.bundled_fonts);
+        let font_families = register_font_stack(&mut font_cx, &options.fonts);
         let fallback_search_families = fallback_search_families(&mut font_cx);
         let mut text = Self {
             font_cx,
             layout_cx: LayoutContext::default(),
-            families: Arc::from(font_family_stack(&options.family)),
+            font_families,
             locale: text_locale(),
             fallback_search_families,
             checked_fallbacks: HashSet::default(),
@@ -196,13 +377,14 @@ impl TextSystem {
     }
 
     pub fn register_font(&mut self, font: BundledFont) -> usize {
-        let count = register_bundled_font(&mut self.font_cx, &font);
+        let count = register_bundled_fallback_font(
+            &mut FontContext::default(),
+            &font,
+            self.options.fonts.fallbacks.len(),
+        );
         if count > 0 {
-            self.options.bundled_fonts.push(font);
-            self.fallback_search_families = fallback_search_families(&mut self.font_cx);
-            self.checked_fallbacks.clear();
-            self.cache.clear();
-            self.metrics = self.measure_metrics();
+            self.options.fonts.fallbacks.push(FontSource::Bundled(font));
+            self.rebuild_fonts();
         }
         count
     }
@@ -217,17 +399,31 @@ impl TextSystem {
         data: &'static [u8],
     ) -> usize {
         let family_name = family_name.into();
-        let count = self
-            .register_font(BundledFont::from_static(data).with_family_name(family_name.clone()));
+        let font = BundledFont::from_static(data).with_family_name(family_name);
+        let count =
+            register_bundled_variant_font(&mut FontContext::default(), &font, FontVariant::Normal);
         if count > 0 {
-            self.set_family(family_name);
+            self.options.fonts.regular = FontSource::Bundled(font);
+            self.rebuild_fonts();
         }
         count
     }
 
+    pub fn set_font_stack(&mut self, fonts: FontStack) {
+        self.options.fonts = fonts;
+        self.rebuild_fonts();
+    }
+
     pub fn set_family(&mut self, family: impl Into<String>) {
-        self.options.family = family.into();
-        self.families = Arc::from(font_family_stack(&self.options.family));
+        self.options.fonts.regular = FontSource::family(family);
+        self.rebuild_fonts();
+    }
+
+    fn rebuild_fonts(&mut self) {
+        self.font_cx = FontContext::default();
+        self.font_families = register_font_stack(&mut self.font_cx, &self.options.fonts);
+        self.fallback_search_families = fallback_search_families(&mut self.font_cx);
+        self.checked_fallbacks.clear();
         self.cache.clear();
         self.metrics = self.measure_metrics();
     }
@@ -271,10 +467,11 @@ impl TextSystem {
         variant: FontVariant,
     ) -> Arc<Layout<()>> {
         let (font_style, font_weight) = font_style(variant);
+        let families = self.font_families.get(variant);
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, true);
-        builder.push_default(FontFamily::from(&self.families[..]));
+        builder.push_default(FontFamily::from(families));
         builder.push_default(StyleProperty::FontSize(self.options.size));
         builder.push_default(StyleProperty::FontStyle(font_style));
         builder.push_default(StyleProperty::FontWeight(font_weight));
@@ -294,7 +491,9 @@ impl TextSystem {
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, sample, 1.0, true);
-        builder.push_default(FontFamily::from(&self.families[..]));
+        builder.push_default(FontFamily::from(
+            self.font_families.get(FontVariant::Normal),
+        ));
         builder.push_default(StyleProperty::FontSize(self.options.size));
         builder.push_default(StyleProperty::Locale(self.locale.clone()));
         if let Some(line_height) = self.options.line_height {
@@ -436,30 +635,6 @@ impl TextSystem {
     }
 }
 
-fn register_bundled_fonts(font_cx: &mut FontContext, fonts: &[BundledFont]) -> usize {
-    fonts
-        .iter()
-        .map(|font| register_bundled_font(font_cx, font))
-        .sum()
-}
-
-fn register_bundled_font(font_cx: &mut FontContext, font: &BundledFont) -> usize {
-    let override_info = font
-        .family_name
-        .as_deref()
-        .map(|family_name| FontInfoOverride {
-            family_name: Some(family_name),
-            ..FontInfoOverride::default()
-        });
-
-    font_cx
-        .collection
-        .register_fonts(font.data.clone(), override_info)
-        .into_iter()
-        .map(|(_, fonts)| fonts.len())
-        .sum()
-}
-
 impl FontVariant {
     fn from_style(style: TextStyle) -> Self {
         match (style.bold, style.italic) {
@@ -471,6 +646,204 @@ impl FontVariant {
     }
 }
 
+fn register_font_stack(font_cx: &mut FontContext, stack: &FontStack) -> VariantFamilyStacks {
+    let fallback_families = fallback_family_stack(font_cx, &stack.fallbacks);
+    let regular_families = source_family_names(
+        font_cx,
+        &stack.regular,
+        SourceRegistration::Variant {
+            variant: FontVariant::Normal,
+            role: "regular",
+        },
+    );
+
+    VariantFamilyStacks {
+        normal: Arc::from(complete_family_stack(
+            regular_families.clone(),
+            &fallback_families,
+        )),
+        bold: Arc::from(match &stack.bold {
+            Some(source) => variant_family_stack(
+                font_cx,
+                source,
+                FontVariant::Bold,
+                "bold",
+                &fallback_families,
+            ),
+            None => complete_family_stack(regular_families.clone(), &fallback_families),
+        }),
+        italic: Arc::from(match &stack.italic {
+            Some(source) => variant_family_stack(
+                font_cx,
+                source,
+                FontVariant::Italic,
+                "italic",
+                &fallback_families,
+            ),
+            None => complete_family_stack(regular_families.clone(), &fallback_families),
+        }),
+        bold_italic: Arc::from(match &stack.bold_italic {
+            Some(source) => variant_family_stack(
+                font_cx,
+                source,
+                FontVariant::BoldItalic,
+                "bold_italic",
+                &fallback_families,
+            ),
+            None => complete_family_stack(regular_families, &fallback_families),
+        }),
+    }
+}
+
+fn variant_family_stack(
+    font_cx: &mut FontContext,
+    source: &FontSource,
+    variant: FontVariant,
+    role: &str,
+    fallback_families: &[FontFamilyName<'static>],
+) -> Vec<FontFamilyName<'static>> {
+    let families = source_family_names(
+        font_cx,
+        source,
+        SourceRegistration::Variant { variant, role },
+    );
+    complete_family_stack(families, fallback_families)
+}
+
+fn complete_family_stack(
+    mut families: Vec<FontFamilyName<'static>>,
+    fallback_families: &[FontFamilyName<'static>],
+) -> Vec<FontFamilyName<'static>> {
+    families.extend_from_slice(fallback_families);
+    append_generic_families(&mut families);
+    families
+}
+
+fn fallback_family_stack(
+    font_cx: &mut FontContext,
+    fallbacks: &[FontSource],
+) -> Vec<FontFamilyName<'static>> {
+    let mut families = Vec::new();
+    for (index, source) in fallbacks.iter().enumerate() {
+        families.extend(source_family_names(
+            font_cx,
+            source,
+            SourceRegistration::Fallback { index },
+        ));
+    }
+    families
+}
+
+enum SourceRegistration<'a> {
+    Variant { variant: FontVariant, role: &'a str },
+    Fallback { index: usize },
+}
+
+fn source_family_names(
+    font_cx: &mut FontContext,
+    source: &FontSource,
+    registration: SourceRegistration<'_>,
+) -> Vec<FontFamilyName<'static>> {
+    match source {
+        FontSource::Family(family) => parse_font_family_list(family),
+        FontSource::Bundled(font) => {
+            let family_name = match &font.family_name {
+                Some(family_name) => family_name.clone(),
+                None => match registration {
+                    SourceRegistration::Variant { role, .. } => {
+                        format!("parley_ratatui::{role}")
+                    }
+                    SourceRegistration::Fallback { index } => {
+                        format!("parley_ratatui::fallback::{index}")
+                    }
+                },
+            };
+
+            match registration {
+                SourceRegistration::Variant { variant, .. } => {
+                    register_bundled_variant_font_with_family(font_cx, font, &family_name, variant);
+                }
+                SourceRegistration::Fallback { .. } => {
+                    register_bundled_fallback_font_with_family(font_cx, font, &family_name);
+                }
+            }
+
+            vec![FontFamilyName::Named(Cow::Owned(family_name))]
+        }
+    }
+}
+
+fn register_bundled_variant_font(
+    font_cx: &mut FontContext,
+    font: &BundledFont,
+    variant: FontVariant,
+) -> usize {
+    let family_name = font
+        .family_name
+        .clone()
+        .unwrap_or_else(|| String::from("parley_ratatui::registered"));
+    register_bundled_variant_font_with_family(font_cx, font, &family_name, variant)
+}
+
+fn register_bundled_variant_font_with_family(
+    font_cx: &mut FontContext,
+    font: &BundledFont,
+    family_name: &str,
+    variant: FontVariant,
+) -> usize {
+    let (style, weight) = fontique_style(variant);
+    register_bundled_font(
+        font_cx,
+        font,
+        FontInfoOverride {
+            family_name: Some(family_name),
+            style: Some(style),
+            weight: Some(weight),
+            ..FontInfoOverride::default()
+        },
+    )
+}
+
+fn register_bundled_fallback_font(
+    font_cx: &mut FontContext,
+    font: &BundledFont,
+    index: usize,
+) -> usize {
+    let family_name = font
+        .family_name
+        .clone()
+        .unwrap_or_else(|| format!("parley_ratatui::fallback::{index}"));
+    register_bundled_fallback_font_with_family(font_cx, font, &family_name)
+}
+
+fn register_bundled_fallback_font_with_family(
+    font_cx: &mut FontContext,
+    font: &BundledFont,
+    family_name: &str,
+) -> usize {
+    register_bundled_font(
+        font_cx,
+        font,
+        FontInfoOverride {
+            family_name: Some(family_name),
+            ..FontInfoOverride::default()
+        },
+    )
+}
+
+fn register_bundled_font(
+    font_cx: &mut FontContext,
+    font: &BundledFont,
+    override_info: FontInfoOverride<'_>,
+) -> usize {
+    font_cx
+        .collection
+        .register_fonts(font.data.clone(), Some(override_info))
+        .into_iter()
+        .map(|(_, fonts)| fonts.len())
+        .sum()
+}
+
 fn font_style(variant: FontVariant) -> (FontStyle, FontWeight) {
     match variant {
         FontVariant::Normal => (FontStyle::Normal, FontWeight::NORMAL),
@@ -480,13 +853,22 @@ fn font_style(variant: FontVariant) -> (FontStyle, FontWeight) {
     }
 }
 
+fn fontique_style(variant: FontVariant) -> (FontiqueFontStyle, FontiqueFontWeight) {
+    match variant {
+        FontVariant::Normal => (FontiqueFontStyle::Normal, FontiqueFontWeight::NORMAL),
+        FontVariant::Bold => (FontiqueFontStyle::Normal, FontiqueFontWeight::BOLD),
+        FontVariant::Italic => (FontiqueFontStyle::Italic, FontiqueFontWeight::NORMAL),
+        FontVariant::BoldItalic => (FontiqueFontStyle::Italic, FontiqueFontWeight::BOLD),
+    }
+}
+
 fn single_char(text: &str) -> Option<char> {
     let mut chars = text.chars();
     let first = chars.next()?;
     chars.next().is_none().then_some(first)
 }
 
-fn font_family_stack(family: &str) -> Vec<FontFamilyName<'static>> {
+fn parse_font_family_list(family: &str) -> Vec<FontFamilyName<'static>> {
     let mut families = Vec::new();
     for family in FontFamilyName::parse_css_list(family).filter_map(Result::ok) {
         match family {
@@ -500,11 +882,14 @@ fn font_family_stack(family: &str) -> Vec<FontFamilyName<'static>> {
     if families.is_empty() {
         families.push(FontFamilyName::Named(Cow::Owned(family.to_owned())));
     }
+    families
+}
+
+fn append_generic_families(families: &mut Vec<FontFamilyName<'static>>) {
     families.push(FontFamilyName::Generic(GenericFamily::UiMonospace));
     families.push(FontFamilyName::Generic(GenericFamily::Monospace));
     families.push(FontFamilyName::Generic(GenericFamily::SystemUi));
     families.push(FontFamilyName::Generic(GenericFamily::Emoji));
-    families
 }
 
 fn fallback_search_families(font_cx: &mut FontContext) -> Arc<[FamilyId]> {
@@ -602,7 +987,10 @@ fn fontique_script_for_char(character: char) -> Option<parley::fontique::Script>
 
 #[cfg(test)]
 mod tests {
-    use super::{FontOptions, TextSystem, fontique_script_for_char, normalize_locale};
+    use super::{
+        FontOptions, FontSource, FontStack, FontVariant, TextSystem, fontique_script_for_char,
+        normalize_locale,
+    };
 
     #[test]
     fn explicit_line_height_is_honored_without_forcing_the_default() {
@@ -661,5 +1049,29 @@ mod tests {
 
         assert_eq!(text.register_font_data(invalid_font), 0);
         assert_eq!(text.metrics(), metrics);
+    }
+
+    #[test]
+    fn font_stack_tracks_explicit_variant_and_fallback_sources() {
+        let mut text = TextSystem::new(
+            FontOptions::default().with_font_stack(
+                FontStack::new("Regular Mono")
+                    .with_bold("Bold Mono")
+                    .with_italic("Italic Mono")
+                    .with_bold_italic("Bold Italic Mono")
+                    .with_fallback("Emoji Fallback"),
+            ),
+        );
+
+        text.set_font_stack(
+            FontStack::new(FontSource::family("Runtime Regular"))
+                .with_italic(FontSource::family("Runtime Italic")),
+        );
+
+        assert!(matches!(
+            text.options.fonts.italic,
+            Some(FontSource::Family(ref family)) if family == "Runtime Italic"
+        ));
+        assert!(!text.font_families.get(FontVariant::Italic).is_empty());
     }
 }
