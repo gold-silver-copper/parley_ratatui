@@ -159,7 +159,7 @@ fn update_terminal_texture(
         target,
     } = gpu;
     let rgba = gpu_renderer
-        .render_to_rgba8(
+        .render_to_rgba8_with_elapsed(
             renderer,
             device,
             queue,
@@ -167,6 +167,7 @@ fn update_terminal_texture(
             &buffer,
             Some(cursor_position),
             cursor_visible,
+            time.elapsed_secs(),
         )
         .expect("render terminal texture");
     image.data = Some(rgba);

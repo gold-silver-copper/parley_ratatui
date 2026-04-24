@@ -1,11 +1,13 @@
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Position;
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use std::sync::mpsc;
-use vello::kurbo::{Affine, Rect, Stroke};
+use unicode_width::UnicodeWidthStr;
+use vello::kurbo::{Affine, Rect};
 use vello::peniko::{Brush, Fill};
 use vello::{AaConfig, Glyph, RenderParams, Renderer, RendererOptions, Scene, wgpu};
 
+use crate::color::Rgba;
 use crate::color::Theme;
 use crate::text::{FontOptions, TextMetrics, TextStyle, TextSystem};
 
@@ -86,6 +88,19 @@ pub struct TerminalRenderer {
     scene: Scene,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct BlinkState {
+    hide_slow: bool,
+    hide_rapid: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResolvedCellStyle {
+    fg: Rgba,
+    bg: Rgba,
+    display_width: u16,
+}
+
 pub struct GpuRenderer {
     renderer: Renderer,
 }
@@ -119,7 +134,37 @@ impl GpuRenderer {
                     base_color,
                     width: target.width,
                     height: target.height,
-                    antialiasing_method: AaConfig::Area,
+                    antialiasing_method: AaConfig::Msaa8,
+                },
+            )
+            .map_err(RenderError::Render)
+    }
+
+    pub fn render_to_texture_with_elapsed(
+        &mut self,
+        terminal: &mut TerminalRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &TextureTarget,
+        buffer: &Buffer,
+        cursor: Option<Position>,
+        cursor_visible: bool,
+        elapsed_seconds: f32,
+    ) -> Result<(), RenderError> {
+        let base_color = terminal.theme.background.to_peniko();
+        let scene =
+            terminal.build_scene_with_elapsed(buffer, cursor, cursor_visible, elapsed_seconds);
+        self.renderer
+            .render_to_texture(
+                device,
+                queue,
+                scene,
+                &target.view,
+                &RenderParams {
+                    base_color,
+                    width: target.width,
+                    height: target.height,
+                    antialiasing_method: AaConfig::Msaa8,
                 },
             )
             .map_err(RenderError::Render)
@@ -143,6 +188,30 @@ impl GpuRenderer {
             buffer,
             cursor,
             cursor_visible,
+        )?;
+        read_texture_to_rgba8(device, queue, target)
+    }
+
+    pub fn render_to_rgba8_with_elapsed(
+        &mut self,
+        terminal: &mut TerminalRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &TextureTarget,
+        buffer: &Buffer,
+        cursor: Option<Position>,
+        cursor_visible: bool,
+        elapsed_seconds: f32,
+    ) -> Result<Vec<u8>, RenderError> {
+        self.render_to_texture_with_elapsed(
+            terminal,
+            device,
+            queue,
+            target,
+            buffer,
+            cursor,
+            cursor_visible,
+            elapsed_seconds,
         )?;
         read_texture_to_rgba8(device, queue, target)
     }
@@ -179,6 +248,31 @@ impl TerminalRenderer {
         cursor: Option<Position>,
         cursor_visible: bool,
     ) -> &Scene {
+        self.build_scene_inner(buffer, cursor, cursor_visible, BlinkState::default())
+    }
+
+    pub fn build_scene_with_elapsed(
+        &mut self,
+        buffer: &Buffer,
+        cursor: Option<Position>,
+        cursor_visible: bool,
+        elapsed_seconds: f32,
+    ) -> &Scene {
+        self.build_scene_inner(
+            buffer,
+            cursor,
+            cursor_visible,
+            BlinkState::from_elapsed(elapsed_seconds),
+        )
+    }
+
+    fn build_scene_inner(
+        &mut self,
+        buffer: &Buffer,
+        cursor: Option<Position>,
+        cursor_visible: bool,
+        blink: BlinkState,
+    ) -> &Scene {
         self.scene.reset();
 
         let metrics = self.text.metrics();
@@ -195,8 +289,16 @@ impl TerminalRenderer {
 
         for y in 0..buffer.area.height {
             for x in 0..buffer.area.width {
+                let style = self.resolve_buffer_cell_style(buffer, x, y, blink);
+                self.paint_cell_background(x, y, style);
+            }
+        }
+
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
                 let cell = &buffer[(x, y)];
-                self.paint_cell(x, y, cell);
+                let style = self.resolve_buffer_cell_style(buffer, x, y, blink);
+                self.paint_cell_text_and_decorations(x, y, cell, style);
             }
         }
 
@@ -258,28 +360,35 @@ impl TerminalRenderer {
         )
     }
 
-    fn paint_cell(&mut self, x: u16, y: u16, cell: &Cell) {
+    fn paint_cell_background(&mut self, x: u16, y: u16, style: ResolvedCellStyle) {
         let metrics = self.text.metrics();
-        let style = cell.style();
-        let mut fg = self.theme.foreground(style);
-        let mut bg = self.theme.background(style);
-        if style.add_modifier.contains(Modifier::REVERSED) {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-
         let x_px = f32::from(x) * metrics.cell_width;
         let y_px = f32::from(y) * metrics.cell_height;
         fill_rect(
             &mut self.scene,
             x_px,
             y_px,
-            metrics.cell_width,
+            metrics.cell_width * f32::from(style.display_width),
             metrics.cell_height,
-            bg.to_peniko(),
+            style.bg.to_peniko(),
         );
+    }
+
+    fn paint_cell_text_and_decorations(
+        &mut self,
+        x: u16,
+        y: u16,
+        cell: &Cell,
+        resolved: ResolvedCellStyle,
+    ) {
+        let metrics = self.text.metrics();
+        let style = cell.style();
+        let x_px = f32::from(x) * metrics.cell_width;
+        let y_px = f32::from(y) * metrics.cell_height;
+        let cell_width = metrics.cell_width * f32::from(resolved.display_width);
 
         let symbol = cell.symbol();
-        if !symbol.trim().is_empty() && !style.add_modifier.contains(Modifier::HIDDEN) {
+        if should_shape_text(symbol) && !style.add_modifier.contains(Modifier::HIDDEN) {
             let layout = self.text.shape(
                 symbol,
                 TextStyle {
@@ -287,30 +396,119 @@ impl TerminalRenderer {
                     italic: style.add_modifier.contains(Modifier::ITALIC),
                 },
             );
-            paint_layout(&mut self.scene, &layout, x_px, y_px, fg.to_peniko());
+            paint_layout(
+                &mut self.scene,
+                &layout,
+                x_px,
+                y_px,
+                resolved.fg.to_peniko(),
+            );
         }
 
         if style.add_modifier.contains(Modifier::UNDERLINED) {
-            let underline_y =
-                (y_px + metrics.cell_height + metrics.descent - metrics.underline_position).round();
-            stroke_line(
+            let (line_y, thickness) = decoration_geometry(
+                metrics,
+                y_px,
+                metrics.underline_position,
+                metrics.underline_thickness,
+            );
+            fill_rect(
                 &mut self.scene,
                 x_px,
-                underline_y,
-                metrics.cell_width,
-                fg.to_peniko(),
+                line_y,
+                cell_width,
+                thickness,
+                resolved.fg.to_peniko(),
             );
         }
         if style.add_modifier.contains(Modifier::CROSSED_OUT) {
-            let strike_y =
-                (y_px + metrics.cell_height + metrics.descent - metrics.strikeout_position).round();
-            stroke_line(
+            let (line_y, thickness) = decoration_geometry(
+                metrics,
+                y_px,
+                metrics.strikeout_position,
+                metrics.strikeout_thickness,
+            );
+            fill_rect(
                 &mut self.scene,
                 x_px,
-                strike_y,
-                metrics.cell_width,
-                fg.to_peniko(),
+                line_y,
+                cell_width,
+                thickness,
+                resolved.fg.to_peniko(),
             );
+        }
+    }
+
+    fn resolve_buffer_cell_style(
+        &self,
+        buffer: &Buffer,
+        x: u16,
+        y: u16,
+        blink: BlinkState,
+    ) -> ResolvedCellStyle {
+        let cell = &buffer[(x, y)];
+        let mut style = self.resolve_cell_style(cell.style(), cell.symbol(), blink);
+
+        if cell.symbol() == " "
+            && cell.style().bg.is_none()
+            && let Some(owner_style) = self.previous_wide_cell_style(buffer, x, y, blink)
+        {
+            style.fg = owner_style.fg;
+            style.bg = owner_style.bg;
+            style.display_width = 1;
+        }
+
+        style
+    }
+
+    fn previous_wide_cell_style(
+        &self,
+        buffer: &Buffer,
+        x: u16,
+        y: u16,
+        blink: BlinkState,
+    ) -> Option<ResolvedCellStyle> {
+        if x == 0 {
+            return None;
+        }
+
+        let previous = &buffer[(x - 1, y)];
+        (display_width(previous.symbol()) > 1)
+            .then(|| self.resolve_cell_style(previous.style(), previous.symbol(), blink))
+    }
+
+    fn resolve_cell_style(
+        &self,
+        style: Style,
+        symbol: &str,
+        blink: BlinkState,
+    ) -> ResolvedCellStyle {
+        let mut fg = self.theme.foreground(style);
+        let mut bg = self.theme.background(style);
+        if style.add_modifier.contains(Modifier::REVERSED) {
+            std::mem::swap(&mut fg, &mut bg);
+        }
+
+        if style.add_modifier.contains(Modifier::HIDDEN)
+            || (style.add_modifier.contains(Modifier::SLOW_BLINK) && blink.hide_slow)
+            || (style.add_modifier.contains(Modifier::RAPID_BLINK) && blink.hide_rapid)
+        {
+            fg = bg;
+        }
+
+        ResolvedCellStyle {
+            fg,
+            bg,
+            display_width: display_width(symbol).clamp(1, 2),
+        }
+    }
+}
+
+impl BlinkState {
+    fn from_elapsed(elapsed_seconds: f32) -> Self {
+        Self {
+            hide_slow: blink_hidden(elapsed_seconds, 0.5),
+            hide_rapid: blink_hidden(elapsed_seconds, 0.25),
         }
     }
 }
@@ -381,12 +579,29 @@ fn fill_rect(
     );
 }
 
-fn stroke_line(scene: &mut Scene, x: f32, y: f32, width: f32, color: vello::peniko::Color) {
-    let line = vello::kurbo::Line::new(
-        (f64::from(x), f64::from(y)),
-        (f64::from(x + width), f64::from(y)),
-    );
-    scene.stroke(&Stroke::new(1.0), Affine::IDENTITY, color, None, &line);
+fn should_shape_text(symbol: &str) -> bool {
+    symbol.chars().any(|character| !character.is_whitespace())
+}
+
+fn display_width(symbol: &str) -> u16 {
+    UnicodeWidthStr::width(symbol).max(1).min(u16::MAX as usize) as u16
+}
+
+fn decoration_geometry(
+    metrics: TextMetrics,
+    y_px: f32,
+    position: f32,
+    thickness: f32,
+) -> (f32, f32) {
+    let thickness = thickness.round().max(1.0);
+    let y = ((y_px + metrics.baseline - position) - thickness / 2.0)
+        .round()
+        .min(y_px + metrics.cell_height - thickness);
+    (y, thickness)
+}
+
+fn blink_hidden(elapsed_seconds: f32, half_period_seconds: f32) -> bool {
+    ((elapsed_seconds / half_period_seconds).floor() as u64) % 2 == 1
 }
 
 fn read_texture_to_rgba8(

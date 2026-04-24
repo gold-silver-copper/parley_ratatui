@@ -108,8 +108,8 @@ impl TextSystem {
             .unwrap_or_default();
 
         TextMetrics {
-            cell_width: layout.full_width().ceil().max(1.0),
-            cell_height: line.metrics().line_height.ceil().max(1.0),
+            cell_width: layout.full_width().round().max(1.0),
+            cell_height: line.metrics().line_height.round().max(1.0),
             baseline: line.metrics().baseline,
             descent: line.metrics().descent,
             underline_position: run_metrics.underline_offset,

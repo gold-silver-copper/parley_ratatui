@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 parley = "0.9.0"
 ratatui = { version = "0.30.0", default-features = false }
+unicode-width = "0.2.2"
 vello = "0.8.0"
 # Vello 0.8 uses naga 28; enabling its termcolor feature keeps naga compatible
 # when Bevy's wgpu stack enables codespan-reporting's termcolor support.
