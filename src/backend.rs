@@ -47,7 +47,7 @@ impl Backend for ParleyBackend {
     {
         for (x, y, cell) in content {
             if x < self.buffer.area.width && y < self.buffer.area.height {
-                self.buffer[(x, y)] = cell.clone();
+                self.buffer[(x, y)].clone_from(cell);
             }
         }
         Ok(())

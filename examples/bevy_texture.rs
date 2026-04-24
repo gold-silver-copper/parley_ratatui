@@ -9,7 +9,8 @@ use parley_ratatui::ratatui::text::{Line, Span};
 use parley_ratatui::ratatui::widgets::{Block, Borders, Paragraph};
 use parley_ratatui::vello::wgpu;
 use parley_ratatui::{
-    FontOptions, GpuRenderer, ParleyBackend, TerminalRenderer, TextureTarget, Theme,
+    AsyncTextureReadback, FontOptions, GpuRenderer, ParleyBackend, TerminalRenderer, TextureTarget,
+    Theme,
 };
 
 struct TerminalTexture {
@@ -24,6 +25,7 @@ struct OffscreenGpu {
     queue: wgpu::Queue,
     renderer: GpuRenderer,
     target: TextureTarget,
+    readback: AsyncTextureReadback,
 }
 
 impl OffscreenGpu {
@@ -45,12 +47,14 @@ impl OffscreenGpu {
             Some("parley_ratatui.bevy_texture"),
         );
         let renderer = GpuRenderer::new(&device).expect("vello renderer");
+        let readback = AsyncTextureReadback::new();
 
         Self {
             device,
             queue,
             renderer,
             target,
+            readback,
         }
     }
 
@@ -116,9 +120,13 @@ fn update_terminal_texture(
     mut images: ResMut<Assets<Image>>,
     time: Res<Time>,
 ) {
-    let terminal_texture = &mut *terminal_texture;
-    terminal_texture
-        .terminal
+    let TerminalTexture {
+        terminal,
+        renderer,
+        gpu,
+        handle,
+    } = &mut *terminal_texture;
+    terminal
         .draw(|frame| {
             let area = frame.area();
             let title = format!(
@@ -131,12 +139,15 @@ fn update_terminal_texture(
         })
         .expect("draw terminal");
 
-    let (width, height) = terminal_texture
-        .renderer
-        .texture_size_for_buffer(terminal_texture.terminal.backend().buffer());
-    let image = images
-        .get_mut(&terminal_texture.handle)
-        .expect("terminal image");
+    let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
+    let image = images.get_mut(&*handle).expect("terminal image");
+
+    if let Some(data) = image.data.as_mut() {
+        gpu.readback
+            .try_read_rgba8_into(&gpu.device, data)
+            .expect("read terminal texture");
+    }
+
     if image.texture_descriptor.size.width != width
         || image.texture_descriptor.size.height != height
     {
@@ -146,31 +157,33 @@ fn update_terminal_texture(
             depth_or_array_layers: 1,
         });
     }
-    terminal_texture.gpu.resize(width, height);
+    gpu.resize(width, height);
 
-    let buffer = terminal_texture.terminal.backend().buffer().clone();
-    let cursor_position = terminal_texture.terminal.backend().cursor_position();
-    let cursor_visible = terminal_texture.terminal.backend().cursor_visible();
-    let TerminalTexture { renderer, gpu, .. } = &mut *terminal_texture;
+    let cursor_position = terminal.backend().cursor_position();
+    let cursor_visible = terminal.backend().cursor_visible();
+    let buffer = terminal.backend().buffer();
     let OffscreenGpu {
         device,
         queue,
         renderer: gpu_renderer,
         target,
+        readback,
     } = gpu;
-    let rgba = gpu_renderer
-        .render_to_rgba8_with_elapsed(
+    gpu_renderer
+        .render_to_texture_with_elapsed(
             renderer,
             device,
             queue,
             target,
-            &buffer,
+            buffer,
             Some(cursor_position),
             cursor_visible,
             time.elapsed_secs(),
         )
         .expect("render terminal texture");
-    image.data = Some(rgba);
+    readback
+        .submit(device, queue, target)
+        .expect("submit terminal texture readback");
 }
 
 fn demo_lines(elapsed: f32) -> Vec<Line<'static>> {

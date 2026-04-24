@@ -76,6 +76,7 @@ pub(crate) struct TextSystem {
     locale: Option<Language>,
     fallback_search_families: Arc<[FamilyId]>,
     checked_fallbacks: HashSet<(FallbackKey, char)>,
+    fallback_family_scratch: Vec<FamilyId>,
     cache: HashMap<LayoutKey, Arc<Layout<()>>>,
 }
 
@@ -90,6 +91,7 @@ impl TextSystem {
             locale: text_locale(),
             fallback_search_families,
             checked_fallbacks: HashSet::default(),
+            fallback_family_scratch: Vec::new(),
             cache: HashMap::default(),
             options,
             metrics: TextMetrics::default(),
@@ -243,16 +245,17 @@ impl TextSystem {
     }
 
     fn fallbacks_support_character(&mut self, key: FallbackKey, character: char) -> bool {
-        let fallback_families = self
-            .font_cx
-            .collection
-            .fallback_families(key)
-            .collect::<Vec<_>>();
+        let mut fallback_families = std::mem::take(&mut self.fallback_family_scratch);
+        fallback_families.clear();
+        fallback_families.extend(self.font_cx.collection.fallback_families(key));
         let mut buffer = [0; 4];
         let character_text = character.encode_utf8(&mut buffer);
-        fallback_families
-            .into_iter()
-            .any(|family_id| self.family_supports_text(family_id, character_text))
+        let supports_character = fallback_families
+            .iter()
+            .copied()
+            .any(|family_id| self.family_supports_text(family_id, character_text));
+        self.fallback_family_scratch = fallback_families;
+        supports_character
     }
 
     fn seed_fontique_fallbacks(&mut self, key: FallbackKey, character: char) -> bool {

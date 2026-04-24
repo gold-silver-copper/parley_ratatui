@@ -11,7 +11,10 @@ mod text;
 
 pub use backend::ParleyBackend;
 pub use color::{Rgba, Theme};
-pub use renderer::{GpuRenderer, RenderError, TerminalRenderer, TextureTarget};
+pub use renderer::{
+    AsyncTextureReadback, GpuRenderer, RenderError, TerminalRenderer, TextureReadback,
+    TextureTarget,
+};
 pub use text::{FontOptions, TextMetrics};
 
 pub use ratatui;

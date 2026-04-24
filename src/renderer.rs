@@ -1,6 +1,7 @@
 use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Position;
 use ratatui::style::{Modifier, Style};
+use std::collections::VecDeque;
 use std::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 use vello::kurbo::{Affine, Rect};
@@ -86,6 +87,7 @@ pub struct TerminalRenderer {
     text: TextSystem,
     theme: Theme,
     scene: Scene,
+    cells: Vec<ResolvedCellStyle>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -94,15 +96,54 @@ struct BlinkState {
     hide_rapid: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct ResolvedCellStyle {
     fg: Rgba,
     bg: Rgba,
+    fg_color: vello::peniko::Color,
+    bg_color: vello::peniko::Color,
+    modifiers: Modifier,
+    text_style: TextStyle,
     display_width: u16,
 }
 
 pub struct GpuRenderer {
     renderer: Renderer,
+}
+
+/// Reusable blocking texture readback state.
+///
+/// This keeps the staging buffer alive across frames and writes into caller-owned
+/// output storage. It still waits for the GPU before returning, so interactive
+/// applications should prefer [`AsyncTextureReadback`] when they can tolerate a
+/// one-frame pipeline.
+pub struct TextureReadback {
+    buffer: Option<ReadbackBuffer>,
+}
+
+/// Pipelined texture readback state for CPU-owned image bridges.
+///
+/// This is useful for integrations such as the examples in this crate, where
+/// Vello renders on its own `wgpu::Device` and Bevy expects CPU-side
+/// `Image::data`. When Vello and the destination renderer cannot share the same
+/// `wgpu::Texture` directly through their public APIs, this keeps the required
+/// copy asynchronous and reuses staging buffers.
+pub struct AsyncTextureReadback {
+    pending: VecDeque<PendingReadback>,
+    reusable: Vec<ReadbackBuffer>,
+}
+
+struct PendingReadback {
+    readback: ReadbackBuffer,
+    receiver: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+}
+
+struct ReadbackBuffer {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    unpadded_bytes_per_row: u32,
+    padded_bytes_per_row: u32,
 }
 
 impl GpuRenderer {
@@ -192,6 +233,30 @@ impl GpuRenderer {
         read_texture_to_rgba8(device, queue, target)
     }
 
+    pub fn render_to_rgba8_into(
+        &mut self,
+        terminal: &mut TerminalRenderer,
+        readback: &mut TextureReadback,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &TextureTarget,
+        buffer: &Buffer,
+        cursor: Option<Position>,
+        cursor_visible: bool,
+        rgba: &mut Vec<u8>,
+    ) -> Result<(), RenderError> {
+        self.render_to_texture(
+            terminal,
+            device,
+            queue,
+            target,
+            buffer,
+            cursor,
+            cursor_visible,
+        )?;
+        readback.read_texture_to_rgba8_into(device, queue, target, rgba)
+    }
+
     pub fn render_to_rgba8_with_elapsed(
         &mut self,
         terminal: &mut TerminalRenderer,
@@ -215,6 +280,32 @@ impl GpuRenderer {
         )?;
         read_texture_to_rgba8(device, queue, target)
     }
+
+    pub fn render_to_rgba8_with_elapsed_into(
+        &mut self,
+        terminal: &mut TerminalRenderer,
+        readback: &mut TextureReadback,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &TextureTarget,
+        buffer: &Buffer,
+        cursor: Option<Position>,
+        cursor_visible: bool,
+        elapsed_seconds: f32,
+        rgba: &mut Vec<u8>,
+    ) -> Result<(), RenderError> {
+        self.render_to_texture_with_elapsed(
+            terminal,
+            device,
+            queue,
+            target,
+            buffer,
+            cursor,
+            cursor_visible,
+            elapsed_seconds,
+        )?;
+        readback.read_texture_to_rgba8_into(device, queue, target, rgba)
+    }
 }
 
 impl TerminalRenderer {
@@ -223,6 +314,7 @@ impl TerminalRenderer {
             text: TextSystem::new(font),
             theme,
             scene: Scene::new(),
+            cells: Vec::new(),
         }
     }
 
@@ -287,18 +379,16 @@ impl TerminalRenderer {
             self.theme.background.to_peniko(),
         );
 
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                let style = self.resolve_buffer_cell_style(buffer, x, y, blink);
-                self.paint_cell_background(x, y, style);
-            }
-        }
+        self.resolve_buffer_cell_styles(buffer, blink);
+        self.paint_backgrounds(buffer);
 
+        let width = buffer.area.width as usize;
         for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                let cell = &buffer[(x, y)];
-                let style = self.resolve_buffer_cell_style(buffer, x, y, blink);
-                self.paint_cell_text_and_decorations(x, y, cell, style);
+            let row_start = y as usize * width;
+            let row = &buffer.content()[row_start..row_start + width];
+            for (x, cell) in row.iter().enumerate() {
+                let style = self.cells[row_start + x];
+                self.paint_cell_text_and_decorations(x as u16, y, cell, style);
             }
         }
 
@@ -360,18 +450,55 @@ impl TerminalRenderer {
         )
     }
 
-    fn paint_cell_background(&mut self, x: u16, y: u16, style: ResolvedCellStyle) {
+    pub fn render_to_rgba8_into(
+        &mut self,
+        readback: &mut TextureReadback,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &TextureTarget,
+        buffer: &Buffer,
+        cursor: Option<Position>,
+        cursor_visible: bool,
+        rgba: &mut Vec<u8>,
+    ) -> Result<(), RenderError> {
+        GpuRenderer::new(device)?.render_to_rgba8_into(
+            self,
+            readback,
+            device,
+            queue,
+            target,
+            buffer,
+            cursor,
+            cursor_visible,
+            rgba,
+        )
+    }
+
+    fn paint_backgrounds(&mut self, buffer: &Buffer) {
         let metrics = self.text.metrics();
-        let x_px = f32::from(x) * metrics.cell_width;
-        let y_px = f32::from(y) * metrics.cell_height;
-        fill_rect(
-            &mut self.scene,
-            x_px,
-            y_px,
-            metrics.cell_width * f32::from(style.display_width),
-            metrics.cell_height,
-            style.bg.to_peniko(),
-        );
+        let width = buffer.area.width as usize;
+
+        for y in 0..buffer.area.height {
+            let row_start = y as usize * width;
+            let mut run_start = 0usize;
+            while run_start < width {
+                let color = self.cells[row_start + run_start].bg_color;
+                let mut run_end = run_start + 1;
+                while run_end < width && self.cells[row_start + run_end].bg_color == color {
+                    run_end += 1;
+                }
+
+                fill_rect(
+                    &mut self.scene,
+                    run_start as f32 * metrics.cell_width,
+                    f32::from(y) * metrics.cell_height,
+                    (run_end - run_start) as f32 * metrics.cell_width,
+                    metrics.cell_height,
+                    color,
+                );
+                run_start = run_end;
+            }
+        }
     }
 
     fn paint_cell_text_and_decorations(
@@ -382,30 +509,21 @@ impl TerminalRenderer {
         resolved: ResolvedCellStyle,
     ) {
         let metrics = self.text.metrics();
-        let style = cell.style();
         let x_px = f32::from(x) * metrics.cell_width;
         let y_px = f32::from(y) * metrics.cell_height;
         let cell_width = metrics.cell_width * f32::from(resolved.display_width);
 
         let symbol = cell.symbol();
-        if should_shape_text(symbol) && !style.add_modifier.contains(Modifier::HIDDEN) {
-            let layout = self.text.shape(
-                symbol,
-                TextStyle {
-                    bold: style.add_modifier.contains(Modifier::BOLD),
-                    italic: style.add_modifier.contains(Modifier::ITALIC),
-                },
-            );
-            paint_layout(
-                &mut self.scene,
-                &layout,
-                x_px,
-                y_px,
-                resolved.fg.to_peniko(),
-            );
+        let draws_visible_foreground = resolved.fg != resolved.bg;
+        if draws_visible_foreground
+            && should_shape_text(symbol)
+            && !resolved.modifiers.contains(Modifier::HIDDEN)
+        {
+            let layout = self.text.shape(symbol, resolved.text_style);
+            paint_layout(&mut self.scene, &layout, x_px, y_px, resolved.fg_color);
         }
 
-        if style.add_modifier.contains(Modifier::UNDERLINED) {
+        if draws_visible_foreground && resolved.modifiers.contains(Modifier::UNDERLINED) {
             let (line_y, thickness) = decoration_geometry(
                 metrics,
                 y_px,
@@ -418,10 +536,10 @@ impl TerminalRenderer {
                 line_y,
                 cell_width,
                 thickness,
-                resolved.fg.to_peniko(),
+                resolved.fg_color,
             );
         }
-        if style.add_modifier.contains(Modifier::CROSSED_OUT) {
+        if draws_visible_foreground && resolved.modifiers.contains(Modifier::CROSSED_OUT) {
             let (line_y, thickness) = decoration_geometry(
                 metrics,
                 y_px,
@@ -434,47 +552,39 @@ impl TerminalRenderer {
                 line_y,
                 cell_width,
                 thickness,
-                resolved.fg.to_peniko(),
+                resolved.fg_color,
             );
         }
     }
 
-    fn resolve_buffer_cell_style(
-        &self,
-        buffer: &Buffer,
-        x: u16,
-        y: u16,
-        blink: BlinkState,
-    ) -> ResolvedCellStyle {
-        let cell = &buffer[(x, y)];
-        let mut style = self.resolve_cell_style(cell.style(), cell.symbol(), blink);
+    fn resolve_buffer_cell_styles(&mut self, buffer: &Buffer, blink: BlinkState) {
+        let width = buffer.area.width as usize;
+        let height = buffer.area.height as usize;
+        let cell_count = width * height;
+        self.cells.clear();
+        self.cells.reserve(cell_count);
 
-        if cell.symbol() == " "
-            && cell.style().bg.is_none()
-            && let Some(owner_style) = self.previous_wide_cell_style(buffer, x, y, blink)
-        {
-            style.fg = owner_style.fg;
-            style.bg = owner_style.bg;
-            style.display_width = 1;
+        for y in 0..height {
+            let row = &buffer.content()[y * width..(y + 1) * width];
+            for (x, cell) in row.iter().enumerate() {
+                let mut style = self.resolve_cell_style(cell.style(), cell.symbol(), blink);
+
+                if cell.symbol() == " "
+                    && cell.style().bg.is_none()
+                    && x > 0
+                    && display_width(row[x - 1].symbol()) > 1
+                {
+                    let owner_style = self.cells[y * width + x - 1];
+                    style.fg = owner_style.fg;
+                    style.bg = owner_style.bg;
+                    style.fg_color = owner_style.fg_color;
+                    style.bg_color = owner_style.bg_color;
+                    style.display_width = 1;
+                }
+
+                self.cells.push(style);
+            }
         }
-
-        style
-    }
-
-    fn previous_wide_cell_style(
-        &self,
-        buffer: &Buffer,
-        x: u16,
-        y: u16,
-        blink: BlinkState,
-    ) -> Option<ResolvedCellStyle> {
-        if x == 0 {
-            return None;
-        }
-
-        let previous = &buffer[(x - 1, y)];
-        (display_width(previous.symbol()) > 1)
-            .then(|| self.resolve_cell_style(previous.style(), previous.symbol(), blink))
     }
 
     fn resolve_cell_style(
@@ -499,8 +609,233 @@ impl TerminalRenderer {
         ResolvedCellStyle {
             fg,
             bg,
+            fg_color: fg.to_peniko(),
+            bg_color: bg.to_peniko(),
+            modifiers: style.add_modifier,
+            text_style: TextStyle {
+                bold: style.add_modifier.contains(Modifier::BOLD),
+                italic: style.add_modifier.contains(Modifier::ITALIC),
+            },
             display_width: display_width(symbol).clamp(1, 2),
         }
+    }
+}
+
+impl TextureReadback {
+    pub fn new() -> Self {
+        Self { buffer: None }
+    }
+
+    pub fn read_texture_to_rgba8_into(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &TextureTarget,
+        rgba: &mut Vec<u8>,
+    ) -> Result<(), RenderError> {
+        validate_readback_target(target)?;
+        let readback = self
+            .buffer
+            .take()
+            .filter(|readback| readback.matches(target))
+            .unwrap_or_else(|| ReadbackBuffer::new(device, target));
+
+        readback.copy_from_texture(device, queue, target);
+        readback.map_blocking(device)?;
+        readback.copy_rgba8_into(rgba);
+        readback.buffer.unmap();
+        self.buffer = Some(readback);
+        Ok(())
+    }
+}
+
+impl Default for TextureReadback {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AsyncTextureReadback {
+    pub fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            reusable: Vec::new(),
+        }
+    }
+
+    /// Queue a copy from `target` into a reusable staging buffer.
+    ///
+    /// Returns `Ok(false)` when the small readback pipeline is already full; in
+    /// that case the caller can keep displaying the most recent completed frame.
+    pub fn submit(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &TextureTarget,
+    ) -> Result<bool, RenderError> {
+        validate_readback_target(target)?;
+        if self.pending.len() >= 2 {
+            return Ok(false);
+        }
+
+        let readback = self
+            .reusable
+            .iter()
+            .position(|readback| readback.matches(target))
+            .map(|index| self.reusable.swap_remove(index))
+            .unwrap_or_else(|| ReadbackBuffer::new(device, target));
+        let receiver = readback.copy_and_map(device, queue, target);
+        self.pending
+            .push_back(PendingReadback { readback, receiver });
+        Ok(true)
+    }
+
+    /// Poll for the oldest completed readback and copy it into `rgba`.
+    ///
+    /// Returns `Ok(true)` when `rgba` was updated. This method uses
+    /// non-blocking device polling and does not wait for GPU completion.
+    pub fn try_read_rgba8_into(
+        &mut self,
+        device: &wgpu::Device,
+        rgba: &mut Vec<u8>,
+    ) -> Result<bool, RenderError> {
+        let Some(pending) = self.pending.front() else {
+            return Ok(false);
+        };
+
+        match pending.receiver.try_recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(RenderError::CreateReadback(err)),
+            Err(mpsc::TryRecvError::Empty) => {
+                device
+                    .poll(wgpu::PollType::Poll)
+                    .map_err(RenderError::Poll)?;
+                match pending.receiver.try_recv() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => return Err(RenderError::CreateReadback(err)),
+                    Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err(RenderError::ReadbackCanceled);
+                    }
+                }
+            }
+            Err(mpsc::TryRecvError::Disconnected) => return Err(RenderError::ReadbackCanceled),
+        }
+
+        let pending = self.pending.pop_front().expect("pending readback");
+        pending.readback.copy_rgba8_into(rgba);
+        pending.readback.buffer.unmap();
+        self.reusable.push(pending.readback);
+        Ok(true)
+    }
+}
+
+impl Default for AsyncTextureReadback {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReadbackBuffer {
+    fn new(device: &wgpu::Device, target: &TextureTarget) -> Self {
+        let bytes_per_pixel = 4;
+        let unpadded_bytes_per_row = target.width * bytes_per_pixel;
+        let padded_bytes_per_row =
+            align_to(unpadded_bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let size = u64::from(padded_bytes_per_row) * u64::from(target.height);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("parley_ratatui.readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            buffer,
+            width: target.width,
+            height: target.height,
+            unpadded_bytes_per_row,
+            padded_bytes_per_row,
+        }
+    }
+
+    fn matches(&self, target: &TextureTarget) -> bool {
+        self.width == target.width && self.height == target.height
+    }
+
+    fn copy_and_map(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &TextureTarget,
+    ) -> mpsc::Receiver<Result<(), wgpu::BufferAsyncError>> {
+        self.copy_from_texture(device, queue, target);
+        let slice = self.buffer.slice(..);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        receiver
+    }
+
+    fn copy_from_texture(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &TextureTarget,
+    ) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("parley_ratatui.readback_encoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            target.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.padded_bytes_per_row),
+                    rows_per_image: Some(target.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: target.width,
+                height: target.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+    }
+
+    fn map_blocking(&self, device: &wgpu::Device) -> Result<(), RenderError> {
+        let slice = self.buffer.slice(..);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(RenderError::Poll)?;
+        receiver
+            .recv()
+            .map_err(|_| RenderError::ReadbackCanceled)?
+            .map_err(RenderError::CreateReadback)
+    }
+
+    fn copy_rgba8_into(&self, rgba: &mut Vec<u8>) {
+        let mapped = self.buffer.slice(..).get_mapped_range();
+        let target_len = (self.width * self.height * 4) as usize;
+        rgba.resize(target_len, 0);
+        for y in 0..self.height as usize {
+            let src_start = y * self.padded_bytes_per_row as usize;
+            let src_end = src_start + self.unpadded_bytes_per_row as usize;
+            let dst_start = y * self.unpadded_bytes_per_row as usize;
+            let dst_end = dst_start + self.unpadded_bytes_per_row as usize;
+            rgba[dst_start..dst_end].copy_from_slice(&mapped[src_start..src_end]);
+        }
+        drop(mapped);
     }
 }
 
@@ -609,75 +944,20 @@ fn read_texture_to_rgba8(
     queue: &wgpu::Queue,
     target: &TextureTarget,
 ) -> Result<Vec<u8>, RenderError> {
+    let mut readback = TextureReadback::new();
+    let mut rgba = Vec::new();
+    readback.read_texture_to_rgba8_into(device, queue, target, &mut rgba)?;
+    Ok(rgba)
+}
+
+fn validate_readback_target(target: &TextureTarget) -> Result<(), RenderError> {
     if !matches!(
         target.format,
         wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb
     ) {
         return Err(RenderError::ReadbackFormat(target.format));
     }
-
-    let bytes_per_pixel = 4;
-    let unpadded_bytes_per_row = target.width * bytes_per_pixel;
-    let padded_bytes_per_row = align_to(unpadded_bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-    let buffer_size = u64::from(padded_bytes_per_row) * u64::from(target.height);
-
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("parley_ratatui.readback"),
-        size: buffer_size,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("parley_ratatui.readback_encoder"),
-    });
-    encoder.copy_texture_to_buffer(
-        target.texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_bytes_per_row),
-                rows_per_image: Some(target.height),
-            },
-        },
-        wgpu::Extent3d {
-            width: target.width,
-            height: target.height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit([encoder.finish()]);
-
-    let slice = readback.slice(..);
-    let (sender, receiver) = mpsc::sync_channel(1);
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        })
-        .map_err(RenderError::Poll)?;
-    receiver
-        .recv()
-        .map_err(|_| RenderError::ReadbackCanceled)?
-        .map_err(RenderError::CreateReadback)?;
-
-    let mapped = slice.get_mapped_range();
-    let mut rgba = vec![0; (target.width * target.height * bytes_per_pixel) as usize];
-    for y in 0..target.height as usize {
-        let src_start = y * padded_bytes_per_row as usize;
-        let src_end = src_start + unpadded_bytes_per_row as usize;
-        let dst_start = y * unpadded_bytes_per_row as usize;
-        let dst_end = dst_start + unpadded_bytes_per_row as usize;
-        rgba[dst_start..dst_end].copy_from_slice(&mapped[src_start..src_end]);
-    }
-    drop(mapped);
-    readback.unmap();
-
-    Ok(rgba)
+    Ok(())
 }
 
 fn align_to(value: u32, alignment: u32) -> u32 {
