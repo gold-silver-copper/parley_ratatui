@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use parley::layout::PositionedLayoutItem;
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontStack, FontStyle, FontWeight,
+    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontStyle, FontWeight,
     GenericFamily, Layout, LayoutContext, LineHeight, StyleProperty,
 };
 
@@ -47,7 +47,7 @@ pub(crate) struct TextSystem {
     layout_cx: LayoutContext<()>,
     options: FontOptions,
     metrics: TextMetrics,
-    families: Arc<[FontFamily<'static>]>,
+    families: Arc<[FontFamilyName<'static>]>,
 }
 
 impl TextSystem {
@@ -72,7 +72,7 @@ impl TextSystem {
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, text, 1.0, true);
-        builder.push_default(FontStack::from(&self.families[..]));
+        builder.push_default(FontFamily::from(&self.families[..]));
         builder.push_default(StyleProperty::FontSize(self.options.size));
         builder.push_default(StyleProperty::FontStyle(font_style));
         builder.push_default(StyleProperty::FontWeight(font_weight));
@@ -80,7 +80,7 @@ impl TextSystem {
 
         let mut layout = builder.build(text);
         layout.break_all_lines(None);
-        layout.align(None, Alignment::Start, AlignmentOptions::default());
+        layout.align(Alignment::Start, AlignmentOptions::default());
         layout
     }
 
@@ -90,13 +90,13 @@ impl TextSystem {
         let mut builder = self
             .layout_cx
             .ranged_builder(&mut self.font_cx, sample, 1.0, true);
-        builder.push_default(FontStack::from(&self.families[..]));
+        builder.push_default(FontFamily::from(&self.families[..]));
         builder.push_default(StyleProperty::FontSize(self.options.size));
         builder.push_default(LineHeight::Absolute(line_height));
 
         let mut layout = builder.build(sample);
         layout.break_all_lines(None);
-        layout.align(None, Alignment::Start, AlignmentOptions::default());
+        layout.align(Alignment::Start, AlignmentOptions::default());
 
         let line = layout.lines().next().expect("sample line");
         let run_metrics = line
@@ -129,20 +129,22 @@ fn font_style(style: TextStyle) -> (FontStyle, FontWeight) {
     }
 }
 
-fn font_family_stack(family: &str) -> Vec<FontFamily<'static>> {
+fn font_family_stack(family: &str) -> Vec<FontFamilyName<'static>> {
     let mut families = Vec::new();
-    for family in FontFamily::parse_list(family) {
+    for family in FontFamilyName::parse_css_list(family).filter_map(Result::ok) {
         match family {
-            FontFamily::Named(name) => families.push(FontFamily::Named(Cow::Owned(name.into()))),
-            FontFamily::Generic(family) => families.push(FontFamily::Generic(family)),
+            FontFamilyName::Named(name) => {
+                families.push(FontFamilyName::Named(Cow::Owned(name.into_owned())))
+            }
+            FontFamilyName::Generic(family) => families.push(FontFamilyName::Generic(family)),
         }
     }
 
     if families.is_empty() {
-        families.push(FontFamily::Named(Cow::Owned(family.to_owned())));
+        families.push(FontFamilyName::Named(Cow::Owned(family.to_owned())));
     }
-    families.push(FontFamily::Generic(GenericFamily::UiMonospace));
-    families.push(FontFamily::Generic(GenericFamily::Monospace));
-    families.push(FontFamily::Generic(GenericFamily::Emoji));
+    families.push(FontFamilyName::Generic(GenericFamily::UiMonospace));
+    families.push(FontFamilyName::Generic(GenericFamily::Monospace));
+    families.push(FontFamilyName::Generic(GenericFamily::Emoji));
     families
 }
