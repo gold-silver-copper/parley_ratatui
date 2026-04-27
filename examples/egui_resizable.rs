@@ -71,7 +71,9 @@ impl ResizableTerminalApp {
                 painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(17, 24, 39));
 
                 if let Some(texture) = &self.texture {
-                    let image_rect = egui::Rect::from_min_size(rect.min, image_size_points);
+                    let image_origin =
+                        snap_to_physical_pixels(rect.min, ui.ctx().pixels_per_point());
+                    let image_rect = egui::Rect::from_min_size(image_origin, image_size_points);
                     painter.image(
                         texture.id(),
                         image_rect,
@@ -247,6 +249,13 @@ impl OffscreenGpu {
         );
         true
     }
+}
+
+fn snap_to_physical_pixels(position: egui::Pos2, pixels_per_point: f32) -> egui::Pos2 {
+    egui::pos2(
+        (position.x * pixels_per_point).round() / pixels_per_point,
+        (position.y * pixels_per_point).round() / pixels_per_point,
+    )
 }
 
 struct TerminalDemo {

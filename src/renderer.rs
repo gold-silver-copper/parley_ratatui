@@ -898,7 +898,7 @@ fn paint_layout(
             scene
                 .draw_glyphs(font)
                 .brush(&brush)
-                .hint(false)
+                .hint(true)
                 .transform(transform)
                 .font_size(font_size)
                 .normalized_coords(run.normalized_coords())
