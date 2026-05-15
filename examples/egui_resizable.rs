@@ -363,6 +363,11 @@ fn demo_lines() -> Vec<Line<'static>> {
             Span::styled("emoji 😀 🚀 ✨", Style::new().fg(Color::LightYellow)),
         ]),
         Line::from(vec![
+            Span::styled("symbols   ", Style::new().fg(Color::Gray)),
+            Span::raw("♝ ♖ ♞ ♙ ♚ "),
+            Span::styled("Chess Piece Symbols", Style::new().fg(Color::LightYellow)),
+        ]),
+        Line::from(vec![
             Span::styled("box       ", Style::new().fg(Color::Gray)),
             Span::raw("┌────┬────┐  ├────┼────┤  └────┴────┘  ░▒▓█"),
         ]),

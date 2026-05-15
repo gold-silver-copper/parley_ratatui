@@ -330,6 +330,11 @@ fn demo_lines(elapsed: f32) -> Vec<Line<'static>> {
             Span::raw("← ↑ → ↓ ⇐ ⇑ ⇒ ⇓  ≤ ≥ ≠ ≈ ∑ ∫ √ ∞  "),
             Span::styled("Powerline    ", Style::new().fg(Color::LightMagenta)),
         ]),
+        Line::from(vec![
+            Span::styled("chess      ", Style::new().fg(Color::Gray)),
+            Span::raw("♝ ♖ ♞ ♙ ♚ "),
+            Span::styled("Chess Piece Symbols", Style::new().fg(Color::LightYellow)),
+        ]),
         Line::raw(""),
         Line::from(vec![
             Span::styled("background ", Style::new().fg(Color::Gray)),
