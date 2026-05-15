@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use parley::fontique::{
     Blob, FallbackKey, FamilyId, FontInfoOverride, FontStyle as FontiqueFontStyle,
-    FontWeight as FontiqueFontWeight, Language, ScriptExt,
+    FontWeight as FontiqueFontWeight, Language, Script, ScriptExt,
 };
 use parley::layout::PositionedLayoutItem;
 use parley::{
@@ -551,14 +551,22 @@ impl TextSystem {
     }
 
     fn fallback_key_for_char(&self, character: char) -> Option<FallbackKey> {
-        let script = fontique_script_for_char(character)?;
+        let script = unicode_script_for_char(character);
+        if script_uses_common_fallback(script) {
+            return fallback_key_for_common_char(character);
+        }
+
+        Some(self.fallback_key_for_script(script))
+    }
+
+    fn fallback_key_for_script(&self, script: Script) -> FallbackKey {
         let localized = self
             .locale
             .as_ref()
             .map(|locale| FallbackKey::from((script, locale)));
         match localized {
-            Some(key) if key.is_tracked() => Some(key),
-            _ => Some(FallbackKey::from(script)),
+            Some(key) if key.is_tracked() => key,
+            _ => FallbackKey::from(script),
         }
     }
 
@@ -963,7 +971,7 @@ fn normalize_locale(locale: &str) -> Option<String> {
     (!locale.is_empty()).then_some(locale)
 }
 
-fn fontique_script_for_char(character: char) -> Option<parley::fontique::Script> {
+fn unicode_script_for_char(character: char) -> Script {
     let tag = character.script().to_opentype();
     let mut bytes = [
         (tag >> 24) as u8,
@@ -975,22 +983,30 @@ fn fontique_script_for_char(character: char) -> Option<parley::fontique::Script>
     bytes[1] = bytes[1].to_ascii_lowercase();
     bytes[2] = bytes[2].to_ascii_lowercase();
     bytes[3] = bytes[3].to_ascii_lowercase();
-    let script = parley::fontique::Script::from_bytes(bytes);
-    (!matches!(
-        script,
-        parley::fontique::Script::COMMON
-            | parley::fontique::Script::INHERITED
-            | parley::fontique::Script::UNKNOWN
-    ))
-    .then_some(script)
+    Script::from_bytes(bytes)
+}
+
+fn script_uses_common_fallback(script: Script) -> bool {
+    matches!(script, Script::COMMON | Script::INHERITED | Script::UNKNOWN)
+}
+
+fn fallback_key_for_common_char(character: char) -> Option<FallbackKey> {
+    (!character.is_ascii()).then_some(FallbackKey::from(Script::COMMON))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        FontOptions, FontSource, FontStack, FontVariant, TextSystem, fontique_script_for_char,
-        normalize_locale,
+        FontOptions, FontSource, FontStack, FontVariant, Script, TextSystem,
+        fallback_key_for_common_char, normalize_locale, script_uses_common_fallback,
+        unicode_script_for_char,
     };
+
+    fn fallback_script_for_char(character: char) -> Option<Script> {
+        TextSystem::new(FontOptions::default())
+            .fallback_key_for_char(character)
+            .map(|key| key.script())
+    }
 
     #[test]
     fn explicit_line_height_is_honored_without_forcing_the_default() {
@@ -1006,27 +1022,76 @@ mod tests {
     }
 
     #[test]
-    fn common_script_symbols_do_not_seed_fontique_fallbacks() {
-        assert_eq!(fontique_script_for_char('│'), None);
-        assert_eq!(fontique_script_for_char('█'), None);
-        assert_eq!(fontique_script_for_char(''), None);
-        assert_eq!(fontique_script_for_char('!'), None);
+    fn non_ascii_common_script_characters_seed_fontique_fallbacks() {
+        for character in [
+            '│', '█', '≤', '€', '♔', '♕', '♖', '♗', '♘', '♙', '♚', '♛', '♜', '♝', '♞', '♟', '¹',
+            '²', '¼', '½', '⁰', '₀', '①', '⓪', '❶', '…', '—', '“', '”', '\u{a0}', '', '\u{301}',
+        ] {
+            assert_eq!(
+                fallback_script_for_char(character),
+                Some(parley::fontique::Script::COMMON)
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_common_characters_do_not_seed_fontique_fallbacks() {
+        for character in ['!', '.', ',', ' ', '$', '+', '|', '0', '1'] {
+            assert_eq!(fallback_script_for_char(character), None);
+        }
     }
 
     #[test]
     fn non_common_scripts_still_seed_fontique_fallbacks() {
         assert_eq!(
-            fontique_script_for_char('今'),
+            fallback_script_for_char('今'),
             Some(parley::fontique::Script::from_bytes(*b"Hani"))
         );
         assert_eq!(
-            fontique_script_for_char('あ'),
+            fallback_script_for_char('あ'),
             Some(parley::fontique::Script::from_bytes(*b"Hira"))
         );
         assert_eq!(
-            fontique_script_for_char('한'),
+            fallback_script_for_char('한'),
             Some(parley::fontique::Script::from_bytes(*b"Hang"))
         );
+    }
+
+    #[test]
+    fn fallback_key_uses_tracked_locale_for_script_specific_fallbacks() {
+        let mut text = TextSystem::new(FontOptions::default());
+        text.locale = Some(parley::fontique::Language::parse("ja-JP").unwrap());
+
+        let hani = text.fallback_key_for_char('今').unwrap();
+        assert_eq!(
+            hani.script(),
+            parley::fontique::Script::from_bytes(*b"Hani")
+        );
+        assert_eq!(hani.locale_str(), Some("ja"));
+
+        let common = text.fallback_key_for_char('♚').unwrap();
+        assert_eq!(common.script(), parley::fontique::Script::COMMON);
+        assert_eq!(common.locale_str(), None);
+    }
+
+    #[test]
+    fn unicode_script_extraction_stays_separate_from_fallback_selection() {
+        assert_eq!(
+            unicode_script_for_char('♚'),
+            parley::fontique::Script::COMMON
+        );
+        assert!(script_uses_common_fallback(unicode_script_for_char('♚')));
+        assert_eq!(
+            fallback_key_for_common_char('♚').map(|key| key.script()),
+            Some(parley::fontique::Script::COMMON)
+        );
+
+        assert_eq!(
+            unicode_script_for_char('!'),
+            parley::fontique::Script::COMMON
+        );
+        assert!(script_uses_common_fallback(unicode_script_for_char('!')));
+        assert!(fallback_key_for_common_char('!').is_none());
     }
 
     #[test]
