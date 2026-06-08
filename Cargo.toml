@@ -58,6 +58,10 @@ name = "bevy_texture"
 required-features = []
 
 [[example]]
+name = "bevy_zoom"
+required-features = []
+
+[[example]]
 name = "bevy_colors_rgb"
 required-features = []
 
