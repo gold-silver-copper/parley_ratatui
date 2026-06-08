@@ -58,12 +58,13 @@ struct ScaleDiagnostics {
     physical_size: UVec2,
     texture_size: UVec2,
     sprite_size: Vec2,
+    cell_size: Vec2,
     expected_physical_size: Vec2,
     delta: Vec2,
 }
 
 impl ScaleDiagnostics {
-    fn new(window: &Window, grid: TerminalGrid) -> Self {
+    fn new(window: &Window, grid: TerminalGrid, cell_size: Vec2) -> Self {
         let scale_factor = window.scale_factor();
         let sprite_size = texture_logical_size(grid, scale_factor);
         let expected_physical_size = sprite_size * scale_factor.max(1.0);
@@ -77,6 +78,7 @@ impl ScaleDiagnostics {
             physical_size: window.resolution.physical_size(),
             texture_size,
             sprite_size,
+            cell_size,
             expected_physical_size,
             delta,
         }
@@ -224,13 +226,18 @@ fn update_terminal_texture(
 
     let area = terminal.backend().buffer().area;
     let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
+    let metrics = renderer.metrics();
     let grid = TerminalGrid {
         columns: area.width,
         rows: area.height,
         texture_width: width,
         texture_height: height,
     };
-    let diagnostics = ScaleDiagnostics::new(window, grid);
+    let diagnostics = ScaleDiagnostics::new(
+        window,
+        grid,
+        Vec2::new(metrics.cell_width, metrics.cell_height),
+    );
 
     terminal
         .draw(|frame| {
@@ -487,6 +494,16 @@ impl Widget for TerminalDemo {
                     ),
                     Style::new().fg(Color::White),
                 ),
+                Span::styled(" cell ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "{:.2}x{:.2}",
+                        self.diagnostics.cell_size.x, self.diagnostics.cell_size.y
+                    ),
+                    Style::new().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
                 Span::styled(" sprite ", Style::new().fg(Color::Gray)),
                 Span::styled(
                     format!(

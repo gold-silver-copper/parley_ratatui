@@ -514,8 +514,8 @@ impl TextSystem {
             .unwrap_or_default();
 
         TextMetrics {
-            cell_width: layout.full_width().floor().max(1.0),
-            cell_height: line.metrics().line_height.floor().max(1.0),
+            cell_width: terminal_cell_extent(layout.full_width()),
+            cell_height: terminal_cell_extent(line.metrics().line_height),
             baseline: line.metrics().baseline,
             descent: line.metrics().descent,
             underline_position: run_metrics.underline_offset,
@@ -652,6 +652,10 @@ impl FontVariant {
             (false, false) => Self::Normal,
         }
     }
+}
+
+fn terminal_cell_extent(extent: f32) -> f32 {
+    extent.ceil().max(1.0)
 }
 
 fn register_font_stack(font_cx: &mut FontContext, stack: &FontStack) -> VariantFamilyStacks {
@@ -999,7 +1003,7 @@ mod tests {
     use super::{
         FontOptions, FontSource, FontStack, FontVariant, Script, TextSystem,
         fallback_key_for_common_char, normalize_locale, script_uses_common_fallback,
-        unicode_script_for_char,
+        terminal_cell_extent, unicode_script_for_char,
     };
 
     fn fallback_script_for_char(character: char) -> Option<Script> {
@@ -1019,6 +1023,14 @@ mod tests {
 
         assert_eq!(explicit.cell_height, 64.0);
         assert_ne!(natural.cell_height, explicit.cell_height);
+    }
+
+    #[test]
+    fn terminal_cell_extents_are_never_smaller_than_shaped_metrics() {
+        assert_eq!(terminal_cell_extent(0.0), 1.0);
+        assert_eq!(terminal_cell_extent(1.0), 1.0);
+        assert_eq!(terminal_cell_extent(9.01), 10.0);
+        assert_eq!(terminal_cell_extent(21.99), 22.0);
     }
 
     #[test]
