@@ -175,7 +175,7 @@ impl GpuRenderer {
                     base_color,
                     width: target.width,
                     height: target.height,
-                    antialiasing_method: AaConfig::Msaa8,
+                    antialiasing_method: AaConfig::Area,
                 },
             )
             .map_err(RenderError::Render)
@@ -205,7 +205,7 @@ impl GpuRenderer {
                     base_color,
                     width: target.width,
                     height: target.height,
-                    antialiasing_method: AaConfig::Msaa8,
+                    antialiasing_method: AaConfig::Area,
                 },
             )
             .map_err(RenderError::Render)
