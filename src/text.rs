@@ -277,6 +277,8 @@ pub struct TextMetrics {
     pub cell_width: f32,
     pub cell_height: f32,
     pub baseline: f32,
+    pub block_min: f32,
+    pub block_max: f32,
     pub descent: f32,
     pub underline_position: f32,
     pub underline_thickness: f32,
@@ -507,6 +509,7 @@ impl TextSystem {
         layout.align(Alignment::Start, AlignmentOptions::default());
 
         let line = layout.lines().next().expect("sample line");
+        let line_metrics = line.metrics();
         let run_metrics = line
             .items()
             .find_map(|item| match item {
@@ -514,16 +517,20 @@ impl TextSystem {
                 _ => None,
             })
             .unwrap_or_default();
+        let block_min = line_metrics.block_min_coord;
+        let block_max = line_metrics.block_max_coord;
+        let block_height = (block_max - block_min).max(line_metrics.line_height);
+        let baseline = (line_metrics.baseline - block_min).round();
+        let cell_height = terminal_cell_extent(block_height)
+            .max(terminal_cell_extent(baseline + line_metrics.descent));
 
         TextMetrics {
             cell_width: terminal_cell_extent(layout.full_width()),
-            cell_height: terminal_cell_height(
-                line.metrics().line_height,
-                line.metrics().baseline,
-                line.metrics().descent,
-            ),
-            baseline: line.metrics().baseline,
-            descent: line.metrics().descent,
+            cell_height,
+            baseline,
+            block_min,
+            block_max,
+            descent: line_metrics.descent,
             underline_position: run_metrics.underline_offset,
             underline_thickness: run_metrics.underline_size.max(1.0),
             strikeout_position: run_metrics.strikethrough_offset,
@@ -651,10 +658,6 @@ impl TextSystem {
 
 fn terminal_cell_extent(value: f32) -> f32 {
     value.ceil().max(1.0)
-}
-
-fn terminal_cell_height(line_height: f32, baseline: f32, descent: f32) -> f32 {
-    terminal_cell_extent(line_height).max(terminal_cell_extent(baseline + descent))
 }
 
 impl FontVariant {
@@ -1048,6 +1051,12 @@ mod tests {
             assert!(metrics.cell_height >= 1.0);
             assert_eq!(metrics.cell_width.fract(), 0.0);
             assert_eq!(metrics.cell_height.fract(), 0.0);
+            assert!(metrics.baseline >= 0.0);
+            assert!(metrics.baseline <= metrics.cell_height);
+            assert!(
+                metrics.cell_height >= (metrics.block_max - metrics.block_min).ceil(),
+                "font size {size} has undersized cell block: {metrics:?}"
+            );
             assert!(
                 metrics.cell_height >= (metrics.baseline + metrics.descent).ceil(),
                 "font size {size} has clipping-prone metrics: {metrics:?}"
@@ -1064,6 +1073,9 @@ mod tests {
         .metrics();
 
         assert_eq!(metrics.cell_height, 20.0);
+        assert!(metrics.baseline >= 0.0);
+        assert!(metrics.baseline <= metrics.cell_height);
+        assert!(metrics.cell_height >= (metrics.block_max - metrics.block_min).ceil());
         assert!(
             metrics.cell_height >= (metrics.baseline + metrics.descent).ceil(),
             "explicit line height produced clipping-prone metrics: {metrics:?}"
