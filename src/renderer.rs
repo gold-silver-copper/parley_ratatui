@@ -898,7 +898,9 @@ fn paint_layout(
             scene
                 .draw_glyphs(font)
                 .brush(&brush)
-                .hint(true)
+                // Parley already quantizes layout coordinates in physical pixel space.
+                // Additional glyph hinting can perturb vertical metrics by font size.
+                .hint(false)
                 .transform(transform)
                 .font_size(font_size)
                 .normalized_coords(run.normalized_coords())

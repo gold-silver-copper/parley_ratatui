@@ -476,7 +476,9 @@ impl TextSystem {
         builder.push_default(StyleProperty::FontStyle(font_style));
         builder.push_default(StyleProperty::FontWeight(font_weight));
         builder.push_default(StyleProperty::Locale(self.locale.clone()));
-        builder.push_default(LineHeight::Absolute(self.metrics.cell_height));
+        if let Some(line_height) = self.options.line_height {
+            builder.push_default(LineHeight::Absolute(line_height));
+        }
 
         let mut layout = builder.build(text);
         layout.break_all_lines(None);
@@ -514,8 +516,12 @@ impl TextSystem {
             .unwrap_or_default();
 
         TextMetrics {
-            cell_width: layout.full_width().floor().max(1.0),
-            cell_height: line.metrics().line_height.floor().max(1.0),
+            cell_width: terminal_cell_extent(layout.full_width()),
+            cell_height: terminal_cell_height(
+                line.metrics().line_height,
+                line.metrics().baseline,
+                line.metrics().descent,
+            ),
             baseline: line.metrics().baseline,
             descent: line.metrics().descent,
             underline_position: run_metrics.underline_offset,
@@ -641,6 +647,14 @@ impl TextSystem {
                 .all(|character| charmap.map(character).is_some_and(|glyph_id| glyph_id != 0))
         })
     }
+}
+
+fn terminal_cell_extent(value: f32) -> f32 {
+    value.ceil().max(1.0)
+}
+
+fn terminal_cell_height(line_height: f32, baseline: f32, descent: f32) -> f32 {
+    terminal_cell_extent(line_height).max(terminal_cell_extent(baseline + descent))
 }
 
 impl FontVariant {
@@ -1019,6 +1033,41 @@ mod tests {
 
         assert_eq!(explicit.cell_height, 64.0);
         assert_ne!(natural.cell_height, explicit.cell_height);
+    }
+
+    #[test]
+    fn natural_metrics_use_conservative_cell_extents() {
+        for size in 8..=48 {
+            let metrics = TextSystem::new(FontOptions {
+                size: size as f32,
+                ..FontOptions::default()
+            })
+            .metrics();
+
+            assert!(metrics.cell_width >= 1.0);
+            assert!(metrics.cell_height >= 1.0);
+            assert_eq!(metrics.cell_width.fract(), 0.0);
+            assert_eq!(metrics.cell_height.fract(), 0.0);
+            assert!(
+                metrics.cell_height >= (metrics.baseline + metrics.descent).ceil(),
+                "font size {size} has clipping-prone metrics: {metrics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_line_height_uses_the_same_conservative_extent() {
+        let metrics = TextSystem::new(FontOptions {
+            line_height: Some(19.25),
+            ..FontOptions::default()
+        })
+        .metrics();
+
+        assert_eq!(metrics.cell_height, 20.0);
+        assert!(
+            metrics.cell_height >= (metrics.baseline + metrics.descent).ceil(),
+            "explicit line height produced clipping-prone metrics: {metrics:?}"
+        );
     }
 
     #[test]
