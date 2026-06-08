@@ -175,7 +175,7 @@ impl GpuRenderer {
                     base_color,
                     width: target.width,
                     height: target.height,
-                    antialiasing_method: AaConfig::Area,
+                    antialiasing_method: AaConfig::Msaa8,
                 },
             )
             .map_err(RenderError::Render)
@@ -205,7 +205,7 @@ impl GpuRenderer {
                     base_color,
                     width: target.width,
                     height: target.height,
-                    antialiasing_method: AaConfig::Area,
+                    antialiasing_method: AaConfig::Msaa8,
                 },
             )
             .map_err(RenderError::Render)
@@ -547,14 +547,7 @@ impl TerminalRenderer {
             && !resolved.modifiers.contains(Modifier::HIDDEN)
         {
             let layout = self.text.shape(symbol, resolved.text_style);
-            paint_layout(
-                &mut self.scene,
-                &layout,
-                metrics,
-                x_px,
-                y_px,
-                resolved.fg_color,
-            );
+            paint_layout(&mut self.scene, &layout, x_px, y_px, resolved.fg_color);
         }
 
         if draws_visible_foreground && resolved.modifiers.contains(Modifier::UNDERLINED) {
@@ -885,7 +878,6 @@ impl BlinkState {
 fn paint_layout(
     scene: &mut Scene,
     layout: &parley::Layout<()>,
-    metrics: TextMetrics,
     x: f32,
     y: f32,
     color: vello::peniko::Color,
@@ -902,13 +894,11 @@ fn paint_layout(
             let font = run.font();
             let font_size = run.font_size();
             let mut x = glyph_run.offset();
-            let y = metrics.baseline;
+            let y = glyph_run.baseline();
             scene
                 .draw_glyphs(font)
                 .brush(&brush)
-                // Parley already quantizes layout coordinates in physical pixel space.
-                // Additional glyph hinting can perturb vertical metrics by font size.
-                .hint(false)
+                .hint(true)
                 .transform(transform)
                 .font_size(font_size)
                 .normalized_coords(run.normalized_coords())
