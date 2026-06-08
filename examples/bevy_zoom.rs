@@ -50,6 +50,43 @@ struct TerminalGrid {
     texture_height: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ScaleDiagnostics {
+    scale_factor: f32,
+    base_scale_factor: f32,
+    logical_size: Vec2,
+    physical_size: UVec2,
+    texture_size: UVec2,
+    sprite_size: Vec2,
+    expected_physical_size: Vec2,
+    delta: Vec2,
+}
+
+impl ScaleDiagnostics {
+    fn new(window: &Window, grid: TerminalGrid) -> Self {
+        let scale_factor = window.scale_factor();
+        let sprite_size = texture_logical_size(grid, scale_factor);
+        let expected_physical_size = sprite_size * scale_factor.max(1.0);
+        let texture_size = UVec2::new(grid.texture_width, grid.texture_height);
+        let delta = expected_physical_size - texture_size.as_vec2();
+
+        Self {
+            scale_factor,
+            base_scale_factor: window.resolution.base_scale_factor(),
+            logical_size: window.resolution.size(),
+            physical_size: window.resolution.physical_size(),
+            texture_size,
+            sprite_size,
+            expected_physical_size,
+            delta,
+        }
+    }
+
+    fn is_exact(self) -> bool {
+        self.delta.x.abs() <= 0.01 && self.delta.y.abs() <= 0.01
+    }
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
@@ -175,7 +212,6 @@ fn update_terminal_texture(
     time: Res<Time>,
 ) {
     let window = windows.single().expect("primary window");
-    let scale_factor = window.scale_factor();
 
     let TerminalTexture {
         terminal,
@@ -187,22 +223,30 @@ fn update_terminal_texture(
     } = &mut *terminal_texture;
 
     let area = terminal.backend().buffer().area;
+    let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
+    let grid = TerminalGrid {
+        columns: area.width,
+        rows: area.height,
+        texture_width: width,
+        texture_height: height,
+    };
+    let diagnostics = ScaleDiagnostics::new(window, grid);
+
     terminal
         .draw(|frame| {
             TerminalDemo {
                 font_size: *font_size,
-                scale_factor,
                 columns: area.width,
                 rows: area.height,
                 frame_count: *frame_count,
                 elapsed: time.elapsed_secs(),
+                diagnostics,
             }
             .render(frame.area(), frame.buffer_mut());
         })
         .expect("draw terminal");
     *frame_count = frame_count.wrapping_add(1);
 
-    let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
     let image = images.get_mut(&*handle).expect("terminal image");
     gpu.resize(width, height);
 
@@ -350,17 +394,17 @@ impl OffscreenGpu {
 
 struct TerminalDemo {
     font_size: f32,
-    scale_factor: f32,
     columns: u16,
     rows: u16,
     frame_count: u64,
     elapsed: f32,
+    diagnostics: ScaleDiagnostics,
 }
 
 impl Widget for TerminalDemo {
     fn render(self, area: Rect, buf: &mut parley_ratatui::ratatui::buffer::Buffer) {
         let [header, body, footer] = Layout::vertical([
-            Constraint::Length(5),
+            Constraint::Length(8),
             Constraint::Min(10),
             Constraint::Length(3),
         ])
@@ -368,8 +412,18 @@ impl Widget for TerminalDemo {
 
         let title = format!(
             " Bevy zoom example | font {:.1}px | scale {:.2} | {}x{} ",
-            self.font_size, self.scale_factor, self.columns, self.rows
+            self.font_size, self.diagnostics.scale_factor, self.columns, self.rows
         );
+        let status_style = if self.diagnostics.is_exact() {
+            Style::new().fg(Color::LightGreen).bold()
+        } else {
+            Style::new().fg(Color::LightRed).bold()
+        };
+        let status_text = if self.diagnostics.is_exact() {
+            "1:1 physical pixels"
+        } else {
+            "resampled"
+        };
         let header_text = vec![
             Line::from(vec![
                 Span::styled("Zoom: ", Style::new().fg(Color::Gray)),
@@ -392,6 +446,75 @@ impl Widget for TerminalDemo {
                 Span::styled(
                     format!("{:.2}s", self.elapsed),
                     Style::new().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Window logical ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "{:.1}x{:.1}",
+                        self.diagnostics.logical_size.x, self.diagnostics.logical_size.y
+                    ),
+                    Style::new().fg(Color::White),
+                ),
+                Span::styled(" physical ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "{}x{}",
+                        self.diagnostics.physical_size.x, self.diagnostics.physical_size.y
+                    ),
+                    Style::new().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Scale reported ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:.3}", self.diagnostics.scale_factor),
+                    Style::new().fg(Color::White),
+                ),
+                Span::styled(" base ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:.3}", self.diagnostics.base_scale_factor),
+                    Style::new().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Texture ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "{}x{}",
+                        self.diagnostics.texture_size.x, self.diagnostics.texture_size.y
+                    ),
+                    Style::new().fg(Color::White),
+                ),
+                Span::styled(" sprite ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "{:.2}x{:.2}",
+                        self.diagnostics.sprite_size.x, self.diagnostics.sprite_size.y
+                    ),
+                    Style::new().fg(Color::White),
+                ),
+                Span::styled(" expected physical ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "{:.2}x{:.2}",
+                        self.diagnostics.expected_physical_size.x,
+                        self.diagnostics.expected_physical_size.y
+                    ),
+                    Style::new().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Display ", Style::new().fg(Color::Gray)),
+                Span::styled(status_text, status_style),
+                Span::styled(" delta ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "{:+.3},{:+.3}px",
+                        self.diagnostics.delta.x, self.diagnostics.delta.y
+                    ),
+                    status_style,
                 ),
             ]),
         ];
