@@ -3,10 +3,12 @@ use std::time::{Duration, Instant};
 use bevy::app::AppExit;
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::message::MessageWriter;
+use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat as BevyTextureFormat,
 };
+use bevy::window::PrimaryWindow;
 use palette::{Okhsv, Srgb, convert::FromColorUnclamped};
 use parley_ratatui::ratatui::Terminal;
 use parley_ratatui::ratatui::buffer::Buffer;
@@ -16,8 +18,8 @@ use parley_ratatui::ratatui::text::Text;
 use parley_ratatui::ratatui::widgets::Widget;
 use parley_ratatui::vello::wgpu;
 use parley_ratatui::{
-    AsyncTextureReadback, FontOptions, GpuRenderer, ParleyBackend, TerminalRenderer, TextureTarget,
-    Theme,
+    AsyncTextureReadback, FontOptions, GpuRenderer, ParleyBackend, PresentationScale,
+    TerminalRenderer, TexturePresentation, TextureTarget, Theme,
 };
 
 struct TerminalTexture {
@@ -102,19 +104,25 @@ impl OffscreenGpu {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
+        .add_plugins(DefaultPlugins.set(ImagePlugin::default_linear()))
         .add_systems(Startup, setup)
         .add_systems(Update, (update_terminal_texture, exit_on_key))
         .run();
 }
 
 fn setup(world: &mut World) {
+    let primary_window = world
+        .query_filtered::<&Window, With<PrimaryWindow>>()
+        .single(world)
+        .expect("primary window");
+    let render_scale = render_scale_for_window(primary_window);
     let terminal = Terminal::new(ParleyBackend::new(120, 42)).expect("terminal");
-    let renderer = TerminalRenderer::new(example_font_options(), Theme::default());
+    let renderer =
+        TerminalRenderer::new_scaled(example_font_options(), Theme::default(), render_scale);
     let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
     let gpu = pollster::block_on(OffscreenGpu::new(width, height));
 
-    let image = Image::new_fill(
+    let mut image = Image::new_fill(
         Extent3d {
             width,
             height,
@@ -125,14 +133,18 @@ fn setup(world: &mut World) {
         BevyTextureFormat::Rgba8Unorm,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
+    image.sampler = ImageSampler::linear();
     let handle = world.resource_mut::<Assets<Image>>().add(image);
 
     world.spawn(Camera2d);
-    world.spawn(Sprite {
-        image: handle.clone(),
-        custom_size: Some(Vec2::new(width as f32, height as f32)),
-        ..default()
-    });
+    let sprite_position = snapped_translation(Vec2::ZERO, render_scale);
+    world
+        .spawn(Sprite {
+            image: handle.clone(),
+            custom_size: Some(texture_logical_size(width, height, render_scale)),
+            ..default()
+        })
+        .insert(Transform::from_translation(sprite_position.extend(0.0)));
 
     world.insert_non_send_resource(TerminalTexture {
         terminal,
@@ -141,6 +153,31 @@ fn setup(world: &mut World) {
         gpu,
         handle,
     });
+}
+
+fn texture_logical_size(width: u32, height: u32, render_scale: f32) -> Vec2 {
+    let [width, height] = TexturePresentation::new([width, height], render_scale).logical_size();
+    Vec2::new(width, height)
+}
+
+fn render_scale_for_window(window: &Window) -> f32 {
+    let logical_size = window.resolution.size().max(Vec2::ONE);
+    let physical_size = window.resolution.physical_size();
+    PresentationScale::new(
+        [logical_size.x, logical_size.y],
+        [physical_size.x, physical_size.y],
+        window.scale_factor(),
+        window.resolution.base_scale_factor(),
+    )
+    .render_scale()
+}
+
+fn snapped_translation(position: Vec2, render_scale: f32) -> Vec2 {
+    let [x, y] = parley_ratatui::snap_logical_position_to_physical_pixel(
+        [position.x, position.y],
+        render_scale,
+    );
+    Vec2::new(x, y)
 }
 
 fn example_font_options() -> FontOptions {

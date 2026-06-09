@@ -1,5 +1,6 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::ecs::message::MessageReader;
+use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat as BevyTextureFormat,
@@ -12,8 +13,8 @@ use parley_ratatui::ratatui::text::{Line, Span};
 use parley_ratatui::ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Widget};
 use parley_ratatui::vello::wgpu;
 use parley_ratatui::{
-    FontOptions, GpuRenderer, ParleyBackend, TerminalRenderer, TextureReadback, TextureTarget,
-    Theme,
+    FontOptions, GpuRenderer, ParleyBackend, PresentationScale, TerminalRenderer,
+    TexturePresentation, TextureReadback, TextureTarget, Theme,
 };
 
 const INITIAL_FONT_SIZE: f32 = 18.0;
@@ -54,6 +55,7 @@ struct TerminalGrid {
 struct ScaleDiagnostics {
     scale_factor: f32,
     base_scale_factor: f32,
+    render_scale: f32,
     logical_size: Vec2,
     physical_size: UVec2,
     texture_size: UVec2,
@@ -64,16 +66,22 @@ struct ScaleDiagnostics {
 }
 
 impl ScaleDiagnostics {
-    fn new(window: &Window, grid: TerminalGrid, cell_size: Vec2) -> Self {
+    fn new(window: &Window, grid: TerminalGrid, cell_size: Vec2, render_scale: f32) -> Self {
         let scale_factor = window.scale_factor();
-        let sprite_size = texture_logical_size(grid, scale_factor);
-        let expected_physical_size = sprite_size * scale_factor.max(1.0);
+        let presentation =
+            TexturePresentation::new([grid.texture_width, grid.texture_height], render_scale);
+        let [sprite_width, sprite_height] = presentation.logical_size();
+        let [expected_width, expected_height] = presentation.expected_physical_size();
+        let [delta_x, delta_y] = presentation.physical_delta();
+        let sprite_size = Vec2::new(sprite_width, sprite_height);
+        let expected_physical_size = Vec2::new(expected_width, expected_height);
         let texture_size = UVec2::new(grid.texture_width, grid.texture_height);
-        let delta = expected_physical_size - texture_size.as_vec2();
+        let delta = Vec2::new(delta_x, delta_y);
 
         Self {
             scale_factor,
             base_scale_factor: window.resolution.base_scale_factor(),
+            render_scale,
             logical_size: window.resolution.size(),
             physical_size: window.resolution.physical_size(),
             texture_size,
@@ -91,7 +99,7 @@ impl ScaleDiagnostics {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
+        .add_plugins(DefaultPlugins.set(ImagePlugin::default_linear()))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -105,15 +113,19 @@ fn setup(world: &mut World) {
         .query_filtered::<&Window, With<PrimaryWindow>>()
         .single(world)
         .expect("primary window");
-    let scale_factor = primary_window.scale_factor();
+    let render_scale = render_scale_for_window(primary_window);
     let logical_size = primary_window.resolution.size();
 
     let mut terminal = Terminal::new(ParleyBackend::new(1, 1)).expect("terminal");
-    let renderer = TerminalRenderer::new(example_font_options(INITIAL_FONT_SIZE), Theme::default());
-    let grid = resize_terminal_to_fit(&mut terminal, &renderer, logical_size, scale_factor);
+    let renderer = TerminalRenderer::new_scaled(
+        example_font_options(INITIAL_FONT_SIZE),
+        Theme::default(),
+        render_scale,
+    );
+    let grid = resize_terminal_to_fit(&mut terminal, &renderer, logical_size, render_scale);
     let gpu = pollster::block_on(OffscreenGpu::new(grid.texture_width, grid.texture_height));
 
-    let image = Image::new_fill(
+    let mut image = Image::new_fill(
         Extent3d {
             width: grid.texture_width,
             height: grid.texture_height,
@@ -124,16 +136,18 @@ fn setup(world: &mut World) {
         BevyTextureFormat::Rgba8Unorm,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
+    image.sampler = ImageSampler::linear();
     let handle = world.resource_mut::<Assets<Image>>().add(image);
 
     world.spawn(Camera2d);
+    let sprite_position = snapped_translation(Vec2::ZERO, render_scale);
     world.spawn((
         Sprite {
             image: handle.clone(),
-            custom_size: Some(texture_logical_size(grid, scale_factor)),
+            custom_size: Some(texture_logical_size(grid, render_scale)),
             ..default()
         },
-        Transform::from_translation(Vec3::ZERO),
+        Transform::from_translation(sprite_position.extend(0.0)),
         TerminalSprite,
     ));
 
@@ -151,7 +165,7 @@ fn keyboard_zoom(
     keyboard: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut terminal_texture: NonSendMut<TerminalTexture>,
-    mut sprite: Query<&mut Sprite, With<TerminalSprite>>,
+    mut sprite: Query<(&mut Sprite, &mut Transform), With<TerminalSprite>>,
 ) {
     let zoom_in =
         keyboard.just_pressed(KeyCode::Equal) || keyboard.just_pressed(KeyCode::NumpadAdd);
@@ -169,26 +183,29 @@ fn keyboard_zoom(
     }
 
     terminal_texture.font_size = font_size;
-    terminal_texture.renderer =
-        TerminalRenderer::new(example_font_options(font_size), Theme::default());
-
     let window = windows.single().expect("primary window");
+    let render_scale = render_scale_for_window(window);
+    terminal_texture.renderer = TerminalRenderer::new_scaled(
+        example_font_options(font_size),
+        Theme::default(),
+        render_scale,
+    );
+
     let logical_size = window.resolution.size();
-    let scale_factor = window.scale_factor();
     let grid = resize_terminal_to_fit(
         &mut terminal_texture.terminal,
         &terminal_texture.renderer,
         logical_size,
-        scale_factor,
+        render_scale,
     );
-    sync_sprite_size(&mut sprite, grid, scale_factor);
+    sync_sprite_size(&mut sprite, grid, render_scale);
 }
 
 fn resize_terminal(
     mut events: MessageReader<WindowResized>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut terminal_texture: NonSendMut<TerminalTexture>,
-    mut sprite: Query<&mut Sprite, With<TerminalSprite>>,
+    mut sprite: Query<(&mut Sprite, &mut Transform), With<TerminalSprite>>,
 ) {
     if events.read().next().is_none() {
         return;
@@ -196,15 +213,20 @@ fn resize_terminal(
 
     let window = windows.single().expect("primary window");
     let logical_size = window.resolution.size();
-    let scale_factor = window.scale_factor();
+    let render_scale = render_scale_for_window(window);
     let terminal_texture = &mut *terminal_texture;
+    terminal_texture.renderer = TerminalRenderer::new_scaled(
+        example_font_options(terminal_texture.font_size),
+        Theme::default(),
+        render_scale,
+    );
     let grid = resize_terminal_to_fit(
         &mut terminal_texture.terminal,
         &terminal_texture.renderer,
         logical_size,
-        scale_factor,
+        render_scale,
     );
-    sync_sprite_size(&mut sprite, grid, scale_factor);
+    sync_sprite_size(&mut sprite, grid, render_scale);
 }
 
 fn update_terminal_texture(
@@ -227,6 +249,7 @@ fn update_terminal_texture(
     let area = terminal.backend().buffer().area;
     let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
     let metrics = renderer.metrics();
+    let render_scale = render_scale_for_window(window);
     let grid = TerminalGrid {
         columns: area.width,
         rows: area.height,
@@ -236,7 +259,8 @@ fn update_terminal_texture(
     let diagnostics = ScaleDiagnostics::new(
         window,
         grid,
-        Vec2::new(metrics.cell_width, metrics.cell_height),
+        Vec2::new(metrics.cell_width, metrics.cell_height).max(Vec2::ONE) / render_scale,
+        render_scale,
     );
 
     terminal
@@ -294,14 +318,14 @@ fn resize_terminal_to_fit(
     terminal: &mut Terminal<ParleyBackend>,
     renderer: &TerminalRenderer,
     logical_size: Vec2,
-    scale_factor: f32,
+    render_scale: f32,
 ) -> TerminalGrid {
-    let metrics = renderer.metrics();
-    let physical_size = logical_size.max(Vec2::ONE) * scale_factor.max(1.0);
-    let columns = (physical_size.x / metrics.cell_width)
+    let metrics = renderer.logical_metrics(render_scale);
+    let logical_size = logical_size.max(Vec2::ONE);
+    let columns = (logical_size.x / metrics.cell_width)
         .floor()
         .clamp(1.0, u16::MAX as f32) as u16;
-    let rows = (physical_size.y / metrics.cell_height)
+    let rows = (logical_size.y / metrics.cell_height)
         .floor()
         .clamp(1.0, u16::MAX as f32) as u16;
 
@@ -321,19 +345,41 @@ fn resize_terminal_to_fit(
 }
 
 fn sync_sprite_size(
-    sprite: &mut Query<&mut Sprite, With<TerminalSprite>>,
+    sprite: &mut Query<(&mut Sprite, &mut Transform), With<TerminalSprite>>,
     grid: TerminalGrid,
-    scale_factor: f32,
+    render_scale: f32,
 ) {
-    let mut sprite = sprite.single_mut().expect("terminal sprite");
-    sprite.custom_size = Some(texture_logical_size(grid, scale_factor));
+    let (mut sprite, mut transform) = sprite.single_mut().expect("terminal sprite");
+    sprite.custom_size = Some(texture_logical_size(grid, render_scale));
+    transform.translation = snapped_translation(transform.translation.truncate(), render_scale)
+        .extend(transform.translation.z);
 }
 
-fn texture_logical_size(grid: TerminalGrid, scale_factor: f32) -> Vec2 {
-    Vec2::new(
-        grid.texture_width as f32 / scale_factor.max(1.0),
-        grid.texture_height as f32 / scale_factor.max(1.0),
+fn texture_logical_size(grid: TerminalGrid, render_scale: f32) -> Vec2 {
+    let [width, height] =
+        TexturePresentation::new([grid.texture_width, grid.texture_height], render_scale)
+            .logical_size();
+    Vec2::new(width, height)
+}
+
+fn render_scale_for_window(window: &Window) -> f32 {
+    let logical_size = window.resolution.size().max(Vec2::ONE);
+    let physical_size = window.resolution.physical_size();
+    PresentationScale::new(
+        [logical_size.x, logical_size.y],
+        [physical_size.x, physical_size.y],
+        window.scale_factor(),
+        window.resolution.base_scale_factor(),
     )
+    .render_scale()
+}
+
+fn snapped_translation(position: Vec2, render_scale: f32) -> Vec2 {
+    let [x, y] = parley_ratatui::snap_logical_position_to_physical_pixel(
+        [position.x, position.y],
+        render_scale,
+    );
+    Vec2::new(x, y)
 }
 
 fn example_font_options(size: f32) -> FontOptions {
@@ -419,7 +465,7 @@ impl Widget for TerminalDemo {
 
         let title = format!(
             " Bevy zoom example | font {:.1}px | scale {:.2} | {}x{} ",
-            self.font_size, self.diagnostics.scale_factor, self.columns, self.rows
+            self.font_size, self.diagnostics.render_scale, self.columns, self.rows
         );
         let status_style = if self.diagnostics.is_exact() {
             Style::new().fg(Color::LightGreen).bold()
@@ -482,6 +528,11 @@ impl Widget for TerminalDemo {
                 Span::styled(" base ", Style::new().fg(Color::Gray)),
                 Span::styled(
                     format!("{:.3}", self.diagnostics.base_scale_factor),
+                    Style::new().fg(Color::White),
+                ),
+                Span::styled(" render ", Style::new().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:.3}", self.diagnostics.render_scale),
                     Style::new().fg(Color::White),
                 ),
             ]),

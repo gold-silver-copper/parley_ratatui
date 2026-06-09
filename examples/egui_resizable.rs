@@ -6,8 +6,8 @@ use parley_ratatui::ratatui::text::{Line, Span};
 use parley_ratatui::ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use parley_ratatui::vello::wgpu;
 use parley_ratatui::{
-    AsyncTextureReadback, FontOptions, GpuRenderer, ParleyBackend, TerminalRenderer, TextureTarget,
-    Theme,
+    AsyncTextureReadback, FontOptions, GpuRenderer, ParleyBackend, TerminalRenderer,
+    TexturePresentation, TextureTarget, Theme,
 };
 
 fn main() -> eframe::Result {
@@ -115,10 +115,9 @@ impl ResizableTerminalApp {
         self.draw_terminal(columns, rows);
         self.render_and_submit();
 
-        egui::vec2(
-            width as f32 / pixels_per_point,
-            height as f32 / pixels_per_point,
-        )
+        let [width_points, height_points] =
+            TexturePresentation::new([width, height], pixels_per_point).logical_size();
+        egui::vec2(width_points, height_points)
     }
 
     fn cells_for_size(&self, available_points: egui::Vec2, pixels_per_point: f32) -> (u16, u16) {
@@ -144,12 +143,12 @@ impl ResizableTerminalApp {
 
         let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &self.rgba);
         if let Some(texture) = &mut self.texture {
-            texture.set(image, egui::TextureOptions::NEAREST);
+            texture.set(image, egui::TextureOptions::LINEAR);
         } else {
             self.texture = Some(ctx.load_texture(
                 "parley_ratatui_terminal",
                 image,
-                egui::TextureOptions::NEAREST,
+                egui::TextureOptions::LINEAR,
             ));
         }
     }
@@ -252,10 +251,11 @@ impl OffscreenGpu {
 }
 
 fn snap_to_physical_pixels(position: egui::Pos2, pixels_per_point: f32) -> egui::Pos2 {
-    egui::pos2(
-        (position.x * pixels_per_point).round() / pixels_per_point,
-        (position.y * pixels_per_point).round() / pixels_per_point,
-    )
+    let [x, y] = parley_ratatui::snap_logical_position_to_physical_pixel(
+        [position.x, position.y],
+        pixels_per_point,
+    );
+    egui::pos2(x, y)
 }
 
 struct TerminalDemo {
