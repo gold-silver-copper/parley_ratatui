@@ -1,8 +1,8 @@
 [package]
 name = "parley_ratatui"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "Render Ratatui buffers through Parley and Vello into WGPU textures."
 readme = "README.md"
@@ -22,7 +22,7 @@ vello = "0.9.0"
 naga = { version = "29.0.3", features = ["termcolor"] }
 
 [dev-dependencies]
-bevy = { version = "0.18.1", default-features = false, features = [
+bevy = { version = "0.19.0-rc.2", default-features = false, features = [
     "std",
     "bevy_core_pipeline",
     "bevy_sprite",
@@ -38,7 +38,7 @@ palette = "0.7.6"
 pollster = "0.4.0"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-bevy = { version = "0.18.1", default-features = false, features = [
+bevy = { version = "0.19.0-rc.2", default-features = false, features = [
     "wayland",
     "x11",
 ] }

@@ -1,21 +1,17 @@
-use bevy::asset::RenderAssetUsages;
 use bevy::ecs::message::MessageReader;
-use bevy::image::ImageSampler;
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat as BevyTextureFormat,
-};
 use bevy::window::{PrimaryWindow, WindowResized};
 use parley_ratatui::ratatui::Terminal;
 use parley_ratatui::ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use parley_ratatui::ratatui::style::{Color, Modifier, Style};
 use parley_ratatui::ratatui::text::{Line, Span};
 use parley_ratatui::ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Widget};
-use parley_ratatui::vello::wgpu;
 use parley_ratatui::{
-    FontOptions, GpuRenderer, ParleyBackend, PresentationScale, TerminalRenderer,
-    TexturePresentation, TextureReadback, TextureTarget, Theme,
+    FontOptions, ParleyBackend, PresentationScale, TerminalRenderer, TexturePresentation, Theme,
 };
+
+#[path = "support/bevy_direct.rs"]
+mod bevy_direct;
 
 const INITIAL_FONT_SIZE: f32 = 18.0;
 const MIN_FONT_SIZE: f32 = 8.0;
@@ -28,19 +24,9 @@ struct TerminalSprite;
 struct TerminalTexture {
     terminal: Terminal<ParleyBackend>,
     renderer: TerminalRenderer,
-    gpu: OffscreenGpu,
     handle: Handle<Image>,
     font_size: f32,
     frame_count: u64,
-}
-
-struct OffscreenGpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    renderer: GpuRenderer,
-    target: TextureTarget,
-    readback: TextureReadback,
-    rgba: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +85,10 @@ impl ScaleDiagnostics {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(ImagePlugin::default_linear()))
+        .add_plugins((
+            DefaultPlugins.set(ImagePlugin::default_linear()),
+            bevy_direct::DirectTerminalPlugin,
+        ))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -123,20 +112,11 @@ fn setup(world: &mut World) {
         render_scale,
     );
     let grid = resize_terminal_to_fit(&mut terminal, &renderer, logical_size, render_scale);
-    let gpu = pollster::block_on(OffscreenGpu::new(grid.texture_width, grid.texture_height));
-
-    let mut image = Image::new_fill(
-        Extent3d {
-            width: grid.texture_width,
-            height: grid.texture_height,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        &[15, 18, 24, 255],
-        BevyTextureFormat::Rgba8Unorm,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    let image = bevy_direct::new_terminal_image(
+        grid.texture_width,
+        grid.texture_height,
+        "parley_ratatui.bevy_zoom",
     );
-    image.sampler = ImageSampler::linear();
     let handle = world.resource_mut::<Assets<Image>>().add(image);
 
     world.spawn(Camera2d);
@@ -151,10 +131,9 @@ fn setup(world: &mut World) {
         TerminalSprite,
     ));
 
-    world.insert_non_send_resource(TerminalTexture {
+    world.insert_non_send(TerminalTexture {
         terminal,
         renderer,
-        gpu,
         handle,
         font_size: INITIAL_FONT_SIZE,
         frame_count: 0,
@@ -230,6 +209,7 @@ fn resize_terminal(
 }
 
 fn update_terminal_texture(
+    exchange: Res<bevy_direct::DirectTerminalSceneExchange>,
     mut terminal_texture: NonSendMut<TerminalTexture>,
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -240,7 +220,6 @@ fn update_terminal_texture(
     let TerminalTexture {
         terminal,
         renderer,
-        gpu,
         handle,
         font_size,
         frame_count,
@@ -278,40 +257,21 @@ fn update_terminal_texture(
         .expect("draw terminal");
     *frame_count = frame_count.wrapping_add(1);
 
-    let image = images.get_mut(&*handle).expect("terminal image");
-    gpu.resize(width, height);
+    let mut image = images.get_mut(&*handle).expect("terminal image");
+    bevy_direct::resize_terminal_image(&mut image, width, height);
 
     let cursor_position = terminal.backend().cursor_position();
     let cursor_visible = terminal.backend().cursor_visible();
     let buffer = terminal.backend().buffer();
-    gpu.renderer
-        .render_to_rgba8_into(
-            renderer,
-            &mut gpu.readback,
-            &gpu.device,
-            &gpu.queue,
-            &gpu.target,
-            buffer,
-            Some(cursor_position),
-            cursor_visible,
-            &mut gpu.rgba,
-        )
-        .expect("render terminal texture");
-
-    if image.texture_descriptor.size.width != width
-        || image.texture_descriptor.size.height != height
-    {
-        image.resize(Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        });
-    }
-    let data = image.data.get_or_insert_with(Vec::new);
-    if data.len() != gpu.rgba.len() {
-        data.resize(gpu.rgba.len(), 0);
-    }
-    data.copy_from_slice(&gpu.rgba);
+    bevy_direct::update_direct_terminal_frame(
+        &exchange,
+        handle.clone(),
+        renderer,
+        buffer,
+        Some(cursor_position),
+        cursor_visible,
+        time.elapsed_secs(),
+    );
 }
 
 fn resize_terminal_to_fit(
@@ -395,54 +355,6 @@ fn example_font_options(size: f32) -> FontOptions {
     .with_bold_italic_font(TERMINAL_FAMILIES)
     .with_fallback_family("Apple Color Emoji, Noto Color Emoji")
     .with_fallback_family("Noto Sans CJK JP, PingFang SC, Hiragino Sans")
-}
-
-impl OffscreenGpu {
-    async fn new(width: u32, height: u32) -> Self {
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .expect("wgpu adapter");
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .expect("wgpu device");
-        let target = TextureTarget::new(
-            &device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba8Unorm,
-            Some("parley_ratatui.bevy_zoom"),
-        );
-        let renderer = GpuRenderer::new(&device).expect("vello renderer");
-        let readback = TextureReadback::new();
-
-        Self {
-            device,
-            queue,
-            renderer,
-            target,
-            readback,
-            rgba: Vec::new(),
-        }
-    }
-
-    fn resize(&mut self, width: u32, height: u32) {
-        if self.target.width == width && self.target.height == height {
-            return;
-        }
-
-        self.target = TextureTarget::new(
-            &self.device,
-            width,
-            height,
-            self.target.format,
-            Some("parley_ratatui.bevy_zoom"),
-        );
-        self.readback = TextureReadback::new();
-        self.rgba.clear();
-    }
 }
 
 struct TerminalDemo {
