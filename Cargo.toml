@@ -68,3 +68,7 @@ required-features = []
 [[example]]
 name = "egui_resizable"
 required-features = []
+
+[[example]]
+name = "render_probe"
+required-features = []
