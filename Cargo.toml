@@ -12,7 +12,7 @@ categories = ["command-line-interface", "gui", "rendering"]
 exclude = [".DS_Store"]
 
 [dependencies]
-parley = "0.9.0"
+parley = "0.10.0"
 ratatui = { version = "0.30.1", default-features = false }
 swash = "0.2.8"
 unicode-width = "0.2.2"
