@@ -22,7 +22,7 @@ vello = "0.9.0"
 naga = { version = "29.0.3", features = ["termcolor"] }
 
 [dev-dependencies]
-bevy = { git = "https://github.com/bevyengine/bevy", branch = "main", default-features = false, features = [
+bevy = { version = "0.19.0-rc.2", default-features = false, features = [
     "std",
     "bevy_core_pipeline",
     "bevy_sprite",
@@ -38,7 +38,7 @@ palette = "0.7.6"
 pollster = "0.4.0"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-bevy = { git = "https://github.com/bevyengine/bevy", branch = "main", default-features = false, features = [
+bevy = { version = "0.19.0-rc.2", default-features = false, features = [
     "wayland",
     "x11",
 ] }
