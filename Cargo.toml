@@ -2,7 +2,7 @@
 name = "parley_ratatui"
 version = "0.2.1"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "Render Ratatui buffers through Parley and Vello into WGPU textures."
 readme = "README.md"
