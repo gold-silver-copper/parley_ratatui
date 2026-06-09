@@ -209,7 +209,7 @@ fn resize_terminal(
 }
 
 fn update_terminal_texture(
-    mut commands: Commands,
+    exchange: Res<bevy_direct::DirectTerminalSceneExchange>,
     mut terminal_texture: NonSendMut<TerminalTexture>,
     mut images: ResMut<Assets<Image>>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -264,7 +264,7 @@ fn update_terminal_texture(
     let cursor_visible = terminal.backend().cursor_visible();
     let buffer = terminal.backend().buffer();
     bevy_direct::update_direct_terminal_frame(
-        &mut commands,
+        &exchange,
         handle.clone(),
         renderer,
         buffer,

@@ -448,6 +448,10 @@ impl TerminalRenderer {
         )
     }
 
+    pub fn replace_scene(&mut self, scene: Scene) -> Scene {
+        std::mem::replace(&mut self.scene, scene)
+    }
+
     fn build_scene_inner(
         &mut self,
         buffer: &Buffer,
