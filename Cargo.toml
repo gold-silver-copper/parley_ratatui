@@ -13,13 +13,13 @@ exclude = [".DS_Store"]
 
 [dependencies]
 parley = "0.9.0"
-ratatui = { version = "0.30.0", default-features = false }
-swash = "0.2.7"
+ratatui = { version = "0.30.1", default-features = false }
+swash = "0.2.8"
 unicode-width = "0.2.2"
-vello = "0.8.0"
-# Vello 0.8 uses naga 28; enabling its termcolor feature keeps naga compatible
+vello = "0.9.0"
+# Vello uses naga; enabling its termcolor feature keeps naga compatible
 # when Bevy's wgpu stack enables codespan-reporting's termcolor support.
-naga = { version = "28.0.0", features = ["termcolor"] }
+naga = { version = "29.0.3", features = ["termcolor"] }
 
 [dev-dependencies]
 bevy = { version = "0.18.1", default-features = false, features = [
@@ -30,7 +30,7 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "bevy_winit",
     "keyboard",
 ] }
-eframe = { version = "0.34.1", default-features = false, features = [
+eframe = { version = "0.34.3", default-features = false, features = [
     "default_fonts",
     "glow",
 ] }
@@ -42,7 +42,7 @@ bevy = { version = "0.18.1", default-features = false, features = [
     "wayland",
     "x11",
 ] }
-eframe = { version = "0.34.1", default-features = false, features = [
+eframe = { version = "0.34.3", default-features = false, features = [
     "wayland",
     "x11",
 ] }

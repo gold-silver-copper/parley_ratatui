@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 use vello::kurbo::{Affine, Rect};
 use vello::peniko::{Brush, Fill};
-use vello::{AaConfig, AaSupport, Glyph, RenderParams, Renderer, RendererOptions, Scene, wgpu};
+use vello::{AaConfig, Glyph, RenderParams, Renderer, RendererOptions, Scene, wgpu};
 
 use crate::color::Rgba;
 use crate::color::Theme;
@@ -148,14 +148,8 @@ struct ReadbackBuffer {
 
 impl GpuRenderer {
     pub fn new(device: &wgpu::Device) -> Result<Self, RenderError> {
-        let renderer = Renderer::new(
-            device,
-            RendererOptions {
-                antialiasing_support: AaSupport::area_only(),
-                ..RendererOptions::default()
-            },
-        )
-        .map_err(RenderError::CreateRenderer)?;
+        let renderer = Renderer::new(device, RendererOptions::default())
+            .map_err(RenderError::CreateRenderer)?;
         Ok(Self { renderer })
     }
 
@@ -181,7 +175,7 @@ impl GpuRenderer {
                     base_color,
                     width: target.width,
                     height: target.height,
-                    antialiasing_method: AaConfig::Area,
+                    antialiasing_method: AaConfig::Msaa8,
                 },
             )
             .map_err(RenderError::Render)
@@ -211,7 +205,7 @@ impl GpuRenderer {
                     base_color,
                     width: target.width,
                     height: target.height,
-                    antialiasing_method: AaConfig::Area,
+                    antialiasing_method: AaConfig::Msaa8,
                 },
             )
             .map_err(RenderError::Render)
