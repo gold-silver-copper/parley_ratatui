@@ -116,7 +116,7 @@ fn setup(world: &mut World) {
         .single(world)
         .expect("primary window");
     let render_scale = render_scale_for_window(primary_window);
-    let terminal = Terminal::new(ParleyBackend::new(120, 42)).expect("terminal");
+    let terminal = Terminal::new(ParleyBackend::new(240, 84)).expect("terminal");
     let renderer =
         TerminalRenderer::new_scaled(example_font_options(), Theme::default(), render_scale);
     let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
@@ -183,13 +183,16 @@ fn snapped_translation(position: Vec2, render_scale: f32) -> Vec2 {
 fn example_font_options() -> FontOptions {
     const TERMINAL_FAMILIES: &str = "Menlo, JetBrains Mono, FiraMono Nerd Font";
 
-    FontOptions::default()
-        .with_regular_font(TERMINAL_FAMILIES)
-        .with_bold_font(TERMINAL_FAMILIES)
-        .with_italic_font(TERMINAL_FAMILIES)
-        .with_bold_italic_font(TERMINAL_FAMILIES)
-        .with_fallback_family("Apple Color Emoji, Noto Color Emoji")
-        .with_fallback_family("Noto Sans CJK JP, PingFang SC, Hiragino Sans")
+    FontOptions {
+        size: 8.0,
+        ..FontOptions::default()
+    }
+    .with_regular_font(TERMINAL_FAMILIES)
+    .with_bold_font(TERMINAL_FAMILIES)
+    .with_italic_font(TERMINAL_FAMILIES)
+    .with_bold_italic_font(TERMINAL_FAMILIES)
+    .with_fallback_family("Apple Color Emoji, Noto Color Emoji")
+    .with_fallback_family("Noto Sans CJK JP, PingFang SC, Hiragino Sans")
 }
 
 fn update_terminal_texture(
