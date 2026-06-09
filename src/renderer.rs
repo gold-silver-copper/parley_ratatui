@@ -6,7 +6,9 @@ use std::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 use vello::kurbo::{Affine, Rect};
 use vello::peniko::{Brush, Fill};
-use vello::{AaConfig, Glyph, RenderParams, Renderer, RendererOptions, Scene, wgpu};
+use vello::{
+    AaConfig, Glyph, RenderParams, Renderer, RendererOptions as VelloRendererOptions, Scene, wgpu,
+};
 
 use crate::color::Rgba;
 use crate::color::Theme;
@@ -109,6 +111,20 @@ struct ResolvedCellStyle {
 
 pub struct GpuRenderer {
     renderer: Renderer,
+    options: GpuRendererOptions,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuRendererOptions {
+    pub antialiasing_method: AaConfig,
+}
+
+impl Default for GpuRendererOptions {
+    fn default() -> Self {
+        Self {
+            antialiasing_method: AaConfig::Msaa8,
+        }
+    }
 }
 
 /// Reusable blocking texture readback state.
@@ -148,9 +164,24 @@ struct ReadbackBuffer {
 
 impl GpuRenderer {
     pub fn new(device: &wgpu::Device) -> Result<Self, RenderError> {
-        let renderer = Renderer::new(device, RendererOptions::default())
+        Self::new_with_options(device, GpuRendererOptions::default())
+    }
+
+    pub fn new_with_options(
+        device: &wgpu::Device,
+        options: GpuRendererOptions,
+    ) -> Result<Self, RenderError> {
+        let renderer = Renderer::new(device, VelloRendererOptions::default())
             .map_err(RenderError::CreateRenderer)?;
-        Ok(Self { renderer })
+        Ok(Self { renderer, options })
+    }
+
+    pub fn options(&self) -> GpuRendererOptions {
+        self.options
+    }
+
+    pub fn set_antialiasing_method(&mut self, antialiasing_method: AaConfig) {
+        self.options.antialiasing_method = antialiasing_method;
     }
 
     pub fn render_to_texture(
@@ -175,7 +206,7 @@ impl GpuRenderer {
                     base_color,
                     width: target.width,
                     height: target.height,
-                    antialiasing_method: AaConfig::Msaa8,
+                    antialiasing_method: self.options.antialiasing_method,
                 },
             )
             .map_err(RenderError::Render)
@@ -205,7 +236,7 @@ impl GpuRenderer {
                     base_color,
                     width: target.width,
                     height: target.height,
-                    antialiasing_method: AaConfig::Msaa8,
+                    antialiasing_method: self.options.antialiasing_method,
                 },
             )
             .map_err(RenderError::Render)
@@ -318,8 +349,20 @@ impl TerminalRenderer {
         }
     }
 
+    /// Creates a renderer from logical font options and a physical render scale.
+    ///
+    /// The resulting renderer draws into physical-pixel textures. Use
+    /// [`Self::logical_metrics`] with the same scale for window layout.
+    pub fn new_scaled(font: FontOptions, theme: Theme, render_scale: f32) -> Self {
+        Self::new(font.scaled(render_scale), theme)
+    }
+
     pub fn metrics(&self) -> TextMetrics {
         self.text.metrics()
+    }
+
+    pub fn logical_metrics(&self, render_scale: f32) -> TextMetrics {
+        self.metrics().logical(render_scale)
     }
 
     pub fn register_font(&mut self, font: BundledFont) -> usize {
@@ -547,7 +590,13 @@ impl TerminalRenderer {
             && !resolved.modifiers.contains(Modifier::HIDDEN)
         {
             let layout = self.text.shape(symbol, resolved.text_style);
-            paint_layout(&mut self.scene, &layout, x_px, y_px, resolved.fg_color);
+            paint_layout(
+                &mut self.scene,
+                &layout,
+                x_px + metrics.glyph_offset_x,
+                y_px + metrics.glyph_offset_y,
+                resolved.fg_color,
+            );
         }
 
         if draws_visible_foreground && resolved.modifiers.contains(Modifier::UNDERLINED) {
@@ -898,7 +947,7 @@ fn paint_layout(
             scene
                 .draw_glyphs(font)
                 .brush(&brush)
-                .hint(true)
+                .hint(false)
                 .transform(transform)
                 .font_size(font_size)
                 .normalized_coords(run.normalized_coords())

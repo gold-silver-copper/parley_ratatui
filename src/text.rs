@@ -20,6 +20,14 @@ pub struct FontOptions {
     pub size: f32,
     /// Optional fixed line height in physical pixels.
     pub line_height: Option<f32>,
+    /// Extra cell width in physical pixels, applied before metric flooring.
+    pub cell_width_offset: f32,
+    /// Extra cell height in physical pixels, applied before metric flooring.
+    pub cell_height_offset: f32,
+    /// Horizontal glyph offset inside each cell, in physical pixels.
+    pub glyph_offset_x: f32,
+    /// Vertical glyph offset inside each cell, in physical pixels.
+    pub glyph_offset_y: f32,
     /// Preferred regular, styled, and fallback fonts.
     pub fonts: FontStack,
 }
@@ -97,12 +105,52 @@ impl Default for FontOptions {
         Self {
             size: 16.0,
             line_height: None,
+            cell_width_offset: 0.0,
+            cell_height_offset: 0.0,
+            glyph_offset_x: 0.0,
+            glyph_offset_y: 0.0,
             fonts: FontStack::default(),
         }
     }
 }
 
 impl FontOptions {
+    /// Returns options scaled from logical pixels to physical pixels.
+    ///
+    /// This is intended for renderers that draw into a physical-pixel texture
+    /// while sizing terminal cells in logical window coordinates.
+    pub fn scaled(mut self, scale: f32) -> Self {
+        let scale = scale.max(1.0);
+        self.size *= scale;
+        if let Some(line_height) = &mut self.line_height {
+            *line_height *= scale;
+        }
+        self.cell_width_offset *= scale;
+        self.cell_height_offset *= scale;
+        self.glyph_offset_x *= scale;
+        self.glyph_offset_y *= scale;
+        self
+    }
+
+    /// Adds extra measured cell width in physical pixels.
+    pub fn with_cell_width_offset(mut self, offset: f32) -> Self {
+        self.cell_width_offset = offset;
+        self
+    }
+
+    /// Adds extra measured cell height in physical pixels.
+    pub fn with_cell_height_offset(mut self, offset: f32) -> Self {
+        self.cell_height_offset = offset;
+        self
+    }
+
+    /// Sets a glyph offset inside each cell, in physical pixels.
+    pub fn with_glyph_offset(mut self, x: f32, y: f32) -> Self {
+        self.glyph_offset_x = x;
+        self.glyph_offset_y = y;
+        self
+    }
+
     /// Replaces all font variant and fallback choices.
     pub fn with_font_stack(mut self, fonts: FontStack) -> Self {
         self.fonts = fonts;
@@ -282,6 +330,27 @@ pub struct TextMetrics {
     pub underline_thickness: f32,
     pub strikeout_position: f32,
     pub strikeout_thickness: f32,
+    pub glyph_offset_x: f32,
+    pub glyph_offset_y: f32,
+}
+
+impl TextMetrics {
+    /// Returns metrics converted from physical pixels to logical pixels.
+    pub fn logical(self, scale: f32) -> Self {
+        let scale = scale.max(1.0);
+        Self {
+            cell_width: self.cell_width / scale,
+            cell_height: self.cell_height / scale,
+            baseline: self.baseline / scale,
+            descent: self.descent / scale,
+            underline_position: self.underline_position / scale,
+            underline_thickness: self.underline_thickness / scale,
+            strikeout_position: self.strikeout_position / scale,
+            strikeout_thickness: self.strikeout_thickness / scale,
+            glyph_offset_x: self.glyph_offset_x / scale,
+            glyph_offset_y: self.glyph_offset_y / scale,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -514,14 +583,20 @@ impl TextSystem {
             .unwrap_or_default();
 
         TextMetrics {
-            cell_width: layout.full_width().floor().max(1.0),
-            cell_height: line.metrics().line_height.floor().max(1.0),
+            cell_width: (layout.full_width() + self.options.cell_width_offset)
+                .floor()
+                .max(1.0),
+            cell_height: (line.metrics().line_height + self.options.cell_height_offset)
+                .floor()
+                .max(1.0),
             baseline: line.metrics().baseline,
             descent: line.metrics().descent,
             underline_position: run_metrics.underline_offset,
             underline_thickness: run_metrics.underline_size.max(1.0),
             strikeout_position: run_metrics.strikethrough_offset,
             strikeout_thickness: run_metrics.strikethrough_size.max(1.0),
+            glyph_offset_x: self.options.glyph_offset_x,
+            glyph_offset_y: self.options.glyph_offset_y,
         }
     }
 
@@ -1019,6 +1094,33 @@ mod tests {
 
         assert_eq!(explicit.cell_height, 64.0);
         assert_ne!(natural.cell_height, explicit.cell_height);
+    }
+
+    #[test]
+    fn cell_offsets_adjust_measured_terminal_cell_size() {
+        let natural = TextSystem::new(FontOptions::default()).metrics();
+        let adjusted = TextSystem::new(FontOptions {
+            cell_width_offset: 2.0,
+            cell_height_offset: 3.0,
+            ..FontOptions::default()
+        })
+        .metrics();
+
+        assert_eq!(adjusted.cell_width, natural.cell_width + 2.0);
+        assert_eq!(adjusted.cell_height, natural.cell_height + 3.0);
+    }
+
+    #[test]
+    fn glyph_offsets_are_tracked_and_scaled_with_font_options() {
+        let options = FontOptions::default()
+            .with_glyph_offset(0.5, -1.0)
+            .scaled(2.0);
+        let metrics = TextSystem::new(options).metrics();
+
+        assert_eq!(metrics.glyph_offset_x, 1.0);
+        assert_eq!(metrics.glyph_offset_y, -2.0);
+        assert_eq!(metrics.logical(2.0).glyph_offset_x, 0.5);
+        assert_eq!(metrics.logical(2.0).glyph_offset_y, -1.0);
     }
 
     #[test]
