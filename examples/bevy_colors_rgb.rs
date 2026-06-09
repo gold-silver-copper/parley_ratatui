@@ -1,13 +1,8 @@
 use std::time::{Duration, Instant};
 
 use bevy::app::AppExit;
-use bevy::asset::RenderAssetUsages;
 use bevy::ecs::message::MessageWriter;
-use bevy::image::ImageSampler;
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat as BevyTextureFormat,
-};
 use bevy::window::PrimaryWindow;
 use palette::{Okhsv, Srgb, convert::FromColorUnclamped};
 use parley_ratatui::ratatui::Terminal;
@@ -16,26 +11,16 @@ use parley_ratatui::ratatui::layout::{Constraint, Layout, Position, Rect};
 use parley_ratatui::ratatui::style::Color;
 use parley_ratatui::ratatui::text::Text;
 use parley_ratatui::ratatui::widgets::Widget;
-use parley_ratatui::vello::wgpu;
-use parley_ratatui::{
-    AsyncTextureReadback, FontOptions, GpuRenderer, ParleyBackend, PresentationScale,
-    TerminalRenderer, TexturePresentation, TextureTarget, Theme,
-};
+use parley_ratatui::{FontOptions, ParleyBackend, PresentationScale, TerminalRenderer, Theme};
+
+#[path = "support/bevy_direct.rs"]
+mod bevy_direct;
 
 struct TerminalTexture {
     terminal: Terminal<ParleyBackend>,
     terminal_app: ColorsRgbApp,
     renderer: TerminalRenderer,
-    gpu: OffscreenGpu,
     handle: Handle<Image>,
-}
-
-struct OffscreenGpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    renderer: GpuRenderer,
-    target: TextureTarget,
-    readback: AsyncTextureReadback,
 }
 
 #[derive(Debug, Default)]
@@ -57,54 +42,12 @@ struct ColorsWidget {
     frame_count: usize,
 }
 
-impl OffscreenGpu {
-    async fn new(width: u32, height: u32) -> Self {
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .expect("wgpu adapter");
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .expect("wgpu device");
-        let target = TextureTarget::new(
-            &device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba8Unorm,
-            Some("parley_ratatui.bevy_colors_rgb"),
-        );
-        let renderer = GpuRenderer::new(&device).expect("vello renderer");
-        let readback = AsyncTextureReadback::new();
-
-        Self {
-            device,
-            queue,
-            renderer,
-            target,
-            readback,
-        }
-    }
-
-    fn resize(&mut self, width: u32, height: u32) {
-        if self.target.width == width && self.target.height == height {
-            return;
-        }
-
-        self.target = TextureTarget::new(
-            &self.device,
-            width,
-            height,
-            self.target.format,
-            Some("parley_ratatui.bevy_colors_rgb"),
-        );
-    }
-}
-
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(ImagePlugin::default_linear()))
+        .add_plugins((
+            DefaultPlugins.set(ImagePlugin::default_linear()),
+            bevy_direct::DirectTerminalPlugin,
+        ))
         .add_systems(Startup, setup)
         .add_systems(Update, (update_terminal_texture, exit_on_key))
         .run();
@@ -120,20 +63,7 @@ fn setup(world: &mut World) {
     let renderer =
         TerminalRenderer::new_scaled(example_font_options(), Theme::default(), render_scale);
     let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
-    let gpu = pollster::block_on(OffscreenGpu::new(width, height));
-
-    let mut image = Image::new_fill(
-        Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        &[17, 24, 39, 255],
-        BevyTextureFormat::Rgba8Unorm,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    );
-    image.sampler = ImageSampler::linear();
+    let image = bevy_direct::new_terminal_image(width, height, "parley_ratatui.bevy_colors_rgb");
     let handle = world.resource_mut::<Assets<Image>>().add(image);
 
     world.spawn(Camera2d);
@@ -141,23 +71,21 @@ fn setup(world: &mut World) {
     world
         .spawn(Sprite {
             image: handle.clone(),
-            custom_size: Some(texture_logical_size(width, height, render_scale)),
+            custom_size: Some(bevy_direct::texture_logical_size(
+                width,
+                height,
+                render_scale,
+            )),
             ..default()
         })
         .insert(Transform::from_translation(sprite_position.extend(0.0)));
 
-    world.insert_non_send_resource(TerminalTexture {
+    world.insert_non_send(TerminalTexture {
         terminal,
         terminal_app: ColorsRgbApp::default(),
         renderer,
-        gpu,
         handle,
     });
-}
-
-fn texture_logical_size(width: u32, height: u32, render_scale: f32) -> Vec2 {
-    let [width, height] = TexturePresentation::new([width, height], render_scale).logical_size();
-    Vec2::new(width, height)
 }
 
 fn render_scale_for_window(window: &Window) -> f32 {
@@ -196,6 +124,7 @@ fn example_font_options() -> FontOptions {
 }
 
 fn update_terminal_texture(
+    mut commands: Commands,
     mut terminal_texture: NonSendMut<TerminalTexture>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -203,7 +132,6 @@ fn update_terminal_texture(
         terminal,
         terminal_app,
         renderer,
-        gpu,
         handle,
     } = &mut *terminal_texture;
     terminal
@@ -211,49 +139,21 @@ fn update_terminal_texture(
         .expect("draw terminal");
 
     let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
-    let image = images.get_mut(&*handle).expect("terminal image");
-
-    if let Some(data) = image.data.as_mut() {
-        gpu.readback
-            .try_read_rgba8_into(&gpu.device, data)
-            .expect("read terminal texture");
-    }
-
-    if image.texture_descriptor.size.width != width
-        || image.texture_descriptor.size.height != height
-    {
-        image.resize(Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        });
-    }
-    gpu.resize(width, height);
+    let mut image = images.get_mut(&*handle).expect("terminal image");
+    bevy_direct::resize_terminal_image(&mut image, width, height);
 
     let cursor_position = terminal.backend().cursor_position();
     let cursor_visible = terminal.backend().cursor_visible();
     let buffer = terminal.backend().buffer();
-    let OffscreenGpu {
-        device,
-        queue,
-        renderer: gpu_renderer,
-        target,
-        readback,
-    } = gpu;
-    gpu_renderer
-        .render_to_texture(
-            renderer,
-            device,
-            queue,
-            target,
-            buffer,
-            Some(cursor_position),
-            cursor_visible,
-        )
-        .expect("render terminal texture");
-    readback
-        .submit(device, queue, target)
-        .expect("submit terminal texture readback");
+    bevy_direct::update_direct_terminal_frame(
+        &mut commands,
+        handle.clone(),
+        renderer,
+        buffer,
+        Some(cursor_position),
+        cursor_visible,
+        0.0,
+    );
 }
 
 fn exit_on_key(keys: Res<ButtonInput<KeyCode>>, mut app_exit_writer: MessageWriter<AppExit>) {

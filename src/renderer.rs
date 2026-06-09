@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 use vello::kurbo::{Affine, Rect};
-use vello::peniko::{Brush, Fill};
+use vello::peniko::{Brush, Color as PenikoColor, Fill};
 use vello::{
     AaConfig, Glyph, RenderParams, Renderer, RendererOptions as VelloRendererOptions, Scene, wgpu,
 };
@@ -184,6 +184,32 @@ impl GpuRenderer {
         self.options.antialiasing_method = antialiasing_method;
     }
 
+    pub fn render_scene_to_texture_view(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture_view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        base_color: PenikoColor,
+        scene: &Scene,
+    ) -> Result<(), RenderError> {
+        self.renderer
+            .render_to_texture(
+                device,
+                queue,
+                scene,
+                texture_view,
+                &RenderParams {
+                    base_color,
+                    width,
+                    height,
+                    antialiasing_method: self.options.antialiasing_method,
+                },
+            )
+            .map_err(RenderError::Render)
+    }
+
     pub fn render_to_texture(
         &mut self,
         terminal: &mut TerminalRenderer,
@@ -196,20 +222,15 @@ impl GpuRenderer {
     ) -> Result<(), RenderError> {
         let base_color = terminal.theme.background.to_peniko();
         let scene = terminal.build_scene(buffer, cursor, cursor_visible);
-        self.renderer
-            .render_to_texture(
-                device,
-                queue,
-                scene,
-                &target.view,
-                &RenderParams {
-                    base_color,
-                    width: target.width,
-                    height: target.height,
-                    antialiasing_method: self.options.antialiasing_method,
-                },
-            )
-            .map_err(RenderError::Render)
+        self.render_scene_to_texture_view(
+            device,
+            queue,
+            &target.view,
+            target.width,
+            target.height,
+            base_color,
+            scene,
+        )
     }
 
     pub fn render_to_texture_with_elapsed(
@@ -226,20 +247,15 @@ impl GpuRenderer {
         let base_color = terminal.theme.background.to_peniko();
         let scene =
             terminal.build_scene_with_elapsed(buffer, cursor, cursor_visible, elapsed_seconds);
-        self.renderer
-            .render_to_texture(
-                device,
-                queue,
-                scene,
-                &target.view,
-                &RenderParams {
-                    base_color,
-                    width: target.width,
-                    height: target.height,
-                    antialiasing_method: self.options.antialiasing_method,
-                },
-            )
-            .map_err(RenderError::Render)
+        self.render_scene_to_texture_view(
+            device,
+            queue,
+            &target.view,
+            target.width,
+            target.height,
+            base_color,
+            scene,
+        )
     }
 
     pub fn render_to_rgba8(
@@ -359,6 +375,10 @@ impl TerminalRenderer {
 
     pub fn metrics(&self) -> TextMetrics {
         self.text.metrics()
+    }
+
+    pub fn theme(&self) -> &Theme {
+        &self.theme
     }
 
     pub fn logical_metrics(&self, render_scale: f32) -> TextMetrics {
