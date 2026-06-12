@@ -14,16 +14,51 @@ use parley::{
 };
 use swash::text::Codepoint as _;
 
+/// How measured cell dimensions are quantized to the physical pixel grid.
+///
+/// Quantized cells keep cell edges on whole pixels, but a font-size step whose
+/// advance delta is smaller than one pixel can leave the cell width unchanged
+/// while the cell height grows, making zoom look like a vertical-only stretch.
+/// [`CellQuantization::Fractional`] keeps the exact measured size so both axes
+/// scale proportionally on every font-size step.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CellQuantization {
+    /// Rounds cell dimensions down to whole physical pixels.
+    ///
+    /// This under-allocates up to one pixel per cell and can cramp glyphs.
+    Floor,
+    /// Rounds cell dimensions to the nearest whole physical pixel.
+    #[default]
+    Round,
+    /// Keeps the exact fractional cell dimensions.
+    ///
+    /// Cell edges may fall between pixels and rely on anti-aliasing.
+    Fractional,
+}
+
+impl CellQuantization {
+    /// Applies the quantization policy to a measured dimension.
+    pub fn apply(self, value: f32) -> f32 {
+        match self {
+            Self::Floor => value.floor(),
+            Self::Round => value.round(),
+            Self::Fractional => value,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FontOptions {
     /// Font size in physical pixels.
     pub size: f32,
     /// Optional fixed line height in physical pixels.
     pub line_height: Option<f32>,
-    /// Extra cell width in physical pixels, applied before metric flooring.
+    /// Extra cell width in physical pixels, applied before cell quantization.
     pub cell_width_offset: f32,
-    /// Extra cell height in physical pixels, applied before metric flooring.
+    /// Extra cell height in physical pixels, applied before cell quantization.
     pub cell_height_offset: f32,
+    /// How measured cell dimensions are quantized to the pixel grid.
+    pub cell_quantization: CellQuantization,
     /// Horizontal glyph offset inside each cell, in physical pixels.
     pub glyph_offset_x: f32,
     /// Vertical glyph offset inside each cell, in physical pixels.
@@ -107,6 +142,7 @@ impl Default for FontOptions {
             line_height: None,
             cell_width_offset: 0.0,
             cell_height_offset: 0.0,
+            cell_quantization: CellQuantization::default(),
             glyph_offset_x: 0.0,
             glyph_offset_y: 0.0,
             fonts: FontStack::default(),
@@ -141,6 +177,12 @@ impl FontOptions {
     /// Adds extra measured cell height in physical pixels.
     pub fn with_cell_height_offset(mut self, offset: f32) -> Self {
         self.cell_height_offset = offset;
+        self
+    }
+
+    /// Sets how measured cell dimensions are quantized to the pixel grid.
+    pub fn with_cell_quantization(mut self, quantization: CellQuantization) -> Self {
+        self.cell_quantization = quantization;
         self
     }
 
@@ -582,12 +624,13 @@ impl TextSystem {
             })
             .unwrap_or_default();
 
+        let quantization = self.options.cell_quantization;
         TextMetrics {
-            cell_width: (layout.full_width() + self.options.cell_width_offset)
-                .floor()
+            cell_width: quantization
+                .apply(layout.full_width() + self.options.cell_width_offset)
                 .max(1.0),
-            cell_height: (line.metrics().line_height + self.options.cell_height_offset)
-                .floor()
+            cell_height: quantization
+                .apply(line.metrics().line_height + self.options.cell_height_offset)
                 .max(1.0),
             baseline: line.metrics().baseline,
             descent: line.metrics().descent,
@@ -1072,7 +1115,7 @@ fn fallback_key_for_common_char(character: char) -> Option<FallbackKey> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FontOptions, FontSource, FontStack, FontVariant, Script, TextSystem,
+        CellQuantization, FontOptions, FontSource, FontStack, FontVariant, Script, TextSystem,
         fallback_key_for_common_char, normalize_locale, script_uses_common_fallback,
         unicode_script_for_char,
     };
@@ -1108,6 +1151,52 @@ mod tests {
 
         assert_eq!(adjusted.cell_width, natural.cell_width + 2.0);
         assert_eq!(adjusted.cell_height, natural.cell_height + 3.0);
+    }
+
+    #[test]
+    fn cell_quantization_modes_quantize_the_measured_size() {
+        let metrics_for = |quantization| {
+            TextSystem::new(FontOptions {
+                cell_quantization: quantization,
+                ..FontOptions::default()
+            })
+            .metrics()
+        };
+        let fractional = metrics_for(CellQuantization::Fractional);
+        let floored = metrics_for(CellQuantization::Floor);
+        let rounded = metrics_for(CellQuantization::Round);
+
+        assert_eq!(floored.cell_width, fractional.cell_width.floor().max(1.0));
+        assert_eq!(floored.cell_height, fractional.cell_height.floor().max(1.0));
+        assert_eq!(rounded.cell_width, fractional.cell_width.round().max(1.0));
+        assert_eq!(rounded.cell_height, fractional.cell_height.round().max(1.0));
+    }
+
+    #[test]
+    fn fractional_cells_grow_on_every_font_size_step() {
+        let mut previous: Option<(f32, f32)> = None;
+        for size in 8..=24 {
+            let metrics = TextSystem::new(FontOptions {
+                size: size as f32,
+                cell_quantization: CellQuantization::Fractional,
+                ..FontOptions::default()
+            })
+            .metrics();
+
+            if let Some((width, height)) = previous {
+                assert!(
+                    metrics.cell_width > width,
+                    "cell width must grow at size {size}: {width} -> {}",
+                    metrics.cell_width
+                );
+                assert!(
+                    metrics.cell_height > height,
+                    "cell height must grow at size {size}: {height} -> {}",
+                    metrics.cell_height
+                );
+            }
+            previous = Some((metrics.cell_width, metrics.cell_height));
+        }
     }
 
     #[test]
