@@ -121,7 +121,11 @@ pub fn new_terminal_image(width: u32, height: u32, label: &'static str) -> Image
     image.texture_descriptor.label = Some(label);
     image.texture_descriptor.usage =
         TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING;
-    image.sampler = ImageSampler::linear();
+    // The texture is authored at physical resolution and presented 1:1, so use
+    // point sampling: a terminal wants crisp pixel-aligned cells, and nearest
+    // avoids any antialiased bleed at cell edges if the present is ever slightly
+    // off the pixel grid.
+    image.sampler = ImageSampler::nearest();
     image
 }
 

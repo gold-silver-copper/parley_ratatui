@@ -66,6 +66,10 @@ name = "bevy_colors_rgb"
 required-features = []
 
 [[example]]
+name = "bevy_colors_rgb_large_font"
+required-features = []
+
+[[example]]
 name = "egui_resizable"
 required-features = []
 

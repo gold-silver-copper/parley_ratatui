@@ -46,6 +46,7 @@ During local development in this repository, run the examples with:
 ```sh
 cargo run --example bevy_texture
 cargo run --example bevy_colors_rgb
+cargo run --example bevy_colors_rgb_large_font
 cargo run --example egui_resizable
 ```
 
@@ -635,6 +636,15 @@ changes.
 
 ```sh
 cargo run --example bevy_colors_rgb
+```
+
+### `bevy_colors_rgb_large_font`
+
+The same truecolor animation as `bevy_colors_rgb`, using a 24px font on an
+80x28 grid so the cells are much larger.
+
+```sh
+cargo run --example bevy_colors_rgb_large_font
 ```
 
 ## Limitations

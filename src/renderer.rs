@@ -491,12 +491,16 @@ impl TerminalRenderer {
             && position.x < buffer.area.width
             && position.y < buffer.area.height
         {
+            let x0 = snap_cell_edge(f32::from(position.x), metrics.cell_width);
+            let x1 = snap_cell_edge(f32::from(position.x) + 1.0, metrics.cell_width);
+            let y0 = snap_cell_edge(f32::from(position.y), metrics.cell_height);
+            let y1 = snap_cell_edge(f32::from(position.y) + 1.0, metrics.cell_height);
             fill_rect(
                 &mut self.scene,
-                f32::from(position.x) * metrics.cell_width,
-                f32::from(position.y) * metrics.cell_height,
-                metrics.cell_width,
-                metrics.cell_height,
+                x0,
+                y0,
+                x1 - x0,
+                y1 - y0,
                 self.theme.cursor.to_peniko(),
             );
         }
@@ -574,6 +578,8 @@ impl TerminalRenderer {
 
         for y in 0..buffer.area.height {
             let row_start = y as usize * width;
+            let y0 = snap_cell_edge(f32::from(y), metrics.cell_height);
+            let y1 = snap_cell_edge(f32::from(y) + 1.0, metrics.cell_height);
             let mut run_start = 0usize;
             while run_start < width {
                 let color = self.cells[row_start + run_start].bg_color;
@@ -582,14 +588,9 @@ impl TerminalRenderer {
                     run_end += 1;
                 }
 
-                fill_rect(
-                    &mut self.scene,
-                    run_start as f32 * metrics.cell_width,
-                    f32::from(y) * metrics.cell_height,
-                    (run_end - run_start) as f32 * metrics.cell_width,
-                    metrics.cell_height,
-                    color,
-                );
+                let x0 = snap_cell_edge(run_start as f32, metrics.cell_width);
+                let x1 = snap_cell_edge(run_end as f32, metrics.cell_width);
+                fill_rect(&mut self.scene, x0, y0, x1 - x0, y1 - y0, color);
                 run_start = run_end;
             }
         }
@@ -609,18 +610,25 @@ impl TerminalRenderer {
 
         let symbol = cell.symbol();
         let draws_visible_foreground = resolved.fg != resolved.bg;
-        if draws_visible_foreground
-            && should_shape_text(symbol)
-            && !resolved.modifiers.contains(Modifier::HIDDEN)
-        {
-            let layout = self.text.shape(symbol, resolved.text_style);
-            paint_layout(
-                &mut self.scene,
-                &layout,
-                x_px + metrics.glyph_offset_x,
-                y_px + metrics.glyph_offset_y,
-                resolved.fg_color,
-            );
+        if draws_visible_foreground && !resolved.modifiers.contains(Modifier::HIDDEN) {
+            if let Some(block) = single_char(symbol).and_then(block_element_fill) {
+                // Block and quadrant elements are rendered as geometric fills
+                // covering the exact cell region. The font's glyphs only fill the
+                // em box, not the taller line-height cell, so shaping them leaves a
+                // background strip at the cell edges (visible as seams between
+                // half-block "pixels"). Snapping the fills to the cell grid keeps
+                // them pixel-perfect and tiling with neighbours.
+                self.paint_block_element(x, y, resolved, block);
+            } else if should_shape_text(symbol) {
+                let layout = self.text.shape(symbol, resolved.text_style);
+                paint_layout(
+                    &mut self.scene,
+                    &layout,
+                    x_px + metrics.glyph_offset_x,
+                    y_px + metrics.glyph_offset_y,
+                    resolved.fg_color,
+                );
+            }
         }
 
         if draws_visible_foreground && resolved.modifiers.contains(Modifier::UNDERLINED) {
@@ -654,6 +662,29 @@ impl TerminalRenderer {
                 thickness,
                 resolved.fg_color,
             );
+        }
+    }
+
+    fn paint_block_element(
+        &mut self,
+        x: u16,
+        y: u16,
+        resolved: ResolvedCellStyle,
+        block: BlockElementFill,
+    ) {
+        let metrics = self.text.metrics();
+        let column = f32::from(x);
+        let row = f32::from(y);
+        let span = f32::from(resolved.display_width);
+        for &[fx0, fy0, fx1, fy1] in &block.rects[..block.count] {
+            let x0 = snap_cell_edge(column + fx0 * span, metrics.cell_width);
+            let x1 = snap_cell_edge(column + fx1 * span, metrics.cell_width);
+            let y0 = snap_cell_edge(row + fy0, metrics.cell_height);
+            let y1 = snap_cell_edge(row + fy1, metrics.cell_height);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            fill_rect(&mut self.scene, x0, y0, x1 - x0, y1 - y0, resolved.fg_color);
         }
     }
 
@@ -1014,6 +1045,90 @@ fn fill_rect(
     );
 }
 
+/// Snaps a cell-grid edge (a column or row index times the measured cell size)
+/// to the physical pixel grid.
+///
+/// Cell backgrounds are emitted as one filled rectangle per row/run and
+/// composited source-over. When [`CellQuantization::Fractional`] leaves the cell
+/// size non-integer, two adjacent rectangles share a sub-pixel edge; Vello
+/// antialiases each independently, so their partial coverages combine to less
+/// than full opacity and the base background bleeds through as a thin seam that
+/// drifts with the accumulating fractional phase. Snapping every edge to a whole
+/// pixel makes adjacent cells share an identical integer boundary, so the fills
+/// tile exactly with no seam. For integer cell sizes this is a no-op.
+fn snap_cell_edge(index: f32, cell_size: f32) -> f32 {
+    (index * cell_size).round()
+}
+
+/// Geometric coverage for a block/quadrant element, in unit cell coordinates
+/// (`x` rightward, `y` downward, both in `0.0..=1.0`).
+struct BlockElementFill {
+    rects: [[f32; 4]; 2],
+    count: usize,
+}
+
+fn single_char(symbol: &str) -> Option<char> {
+    let mut chars = symbol.chars();
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
+}
+
+/// Maps the Unicode block and quadrant elements with exact rectangular coverage
+/// (the solid blocks, eighths, halves, and quadrants in `U+2580..=U+259F`) to
+/// that coverage.
+///
+/// Terminals draw these as filled geometry rather than font glyphs so that
+/// half-block "pixels" and box fills tile the cell grid exactly; the font glyphs
+/// only cover the em box and leave seams at the cell edges. The shade characters
+/// `░▒▓` are dithered patterns rather than exact fills, so they are left to the
+/// font shaper.
+fn block_element_fill(ch: char) -> Option<BlockElementFill> {
+    const E: f32 = 1.0 / 8.0;
+    let solid = |rect: [f32; 4]| BlockElementFill {
+        rects: [rect, [0.0; 4]],
+        count: 1,
+    };
+    let pair = |a: [f32; 4], b: [f32; 4]| BlockElementFill {
+        rects: [a, b],
+        count: 2,
+    };
+    Some(match ch {
+        '\u{2588}' => solid([0.0, 0.0, 1.0, 1.0]), // █ full block
+        // Lower eighths ▁▂▃▅▆▇ and halves ▀▄
+        '\u{2580}' => solid([0.0, 0.0, 1.0, 0.5]), // ▀ upper half
+        '\u{2584}' => solid([0.0, 0.5, 1.0, 1.0]), // ▄ lower half
+        '\u{2581}' => solid([0.0, 7.0 * E, 1.0, 1.0]),
+        '\u{2582}' => solid([0.0, 6.0 * E, 1.0, 1.0]),
+        '\u{2583}' => solid([0.0, 5.0 * E, 1.0, 1.0]),
+        '\u{2585}' => solid([0.0, 3.0 * E, 1.0, 1.0]),
+        '\u{2586}' => solid([0.0, 2.0 * E, 1.0, 1.0]),
+        '\u{2587}' => solid([0.0, 1.0 * E, 1.0, 1.0]),
+        '\u{2594}' => solid([0.0, 0.0, 1.0, E]), // ▔ upper eighth
+        // Left eighths ▏▎▍▉▊▋ and halves ▌▐
+        '\u{258C}' => solid([0.0, 0.0, 0.5, 1.0]), // ▌ left half
+        '\u{2590}' => solid([0.5, 0.0, 1.0, 1.0]), // ▐ right half
+        '\u{2589}' => solid([0.0, 0.0, 7.0 * E, 1.0]),
+        '\u{258A}' => solid([0.0, 0.0, 6.0 * E, 1.0]),
+        '\u{258B}' => solid([0.0, 0.0, 5.0 * E, 1.0]),
+        '\u{258D}' => solid([0.0, 0.0, 3.0 * E, 1.0]),
+        '\u{258E}' => solid([0.0, 0.0, 2.0 * E, 1.0]),
+        '\u{258F}' => solid([0.0, 0.0, 1.0 * E, 1.0]),
+        '\u{2595}' => solid([7.0 * E, 0.0, 1.0, 1.0]), // ▕ right eighth
+        // Quadrants ▖▗▘▝ and their combinations ▙▚▛▜▞▟
+        '\u{2596}' => solid([0.0, 0.5, 0.5, 1.0]), // ▖ lower left
+        '\u{2597}' => solid([0.5, 0.5, 1.0, 1.0]), // ▗ lower right
+        '\u{2598}' => solid([0.0, 0.0, 0.5, 0.5]), // ▘ upper left
+        '\u{259D}' => solid([0.5, 0.0, 1.0, 0.5]), // ▝ upper right
+        '\u{2599}' => pair([0.0, 0.0, 0.5, 1.0], [0.5, 0.5, 1.0, 1.0]), // ▙
+        '\u{259A}' => pair([0.0, 0.0, 0.5, 0.5], [0.5, 0.5, 1.0, 1.0]), // ▚
+        '\u{259B}' => pair([0.0, 0.0, 1.0, 0.5], [0.0, 0.5, 0.5, 1.0]), // ▛
+        '\u{259C}' => pair([0.0, 0.0, 1.0, 0.5], [0.5, 0.5, 1.0, 1.0]), // ▜
+        '\u{259E}' => pair([0.5, 0.0, 1.0, 0.5], [0.0, 0.5, 0.5, 1.0]), // ▞
+        '\u{259F}' => pair([0.0, 0.5, 1.0, 1.0], [0.5, 0.0, 1.0, 0.5]), // ▟
+        _ => return None,
+    })
+}
+
 fn should_shape_text(symbol: &str) -> bool {
     symbol.chars().any(|character| !character.is_whitespace())
 }
@@ -1062,4 +1177,77 @@ fn validate_readback_target(target: &TextureTarget) -> Result<(), RenderError> {
 
 fn align_to(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{block_element_fill, snap_cell_edge};
+
+    fn covered_area(ch: char) -> Option<f32> {
+        block_element_fill(ch).map(|block| {
+            block.rects[..block.count]
+                .iter()
+                .map(|[x0, y0, x1, y1]| (x1 - x0) * (y1 - y0))
+                .sum()
+        })
+    }
+
+    #[test]
+    fn block_elements_cover_exact_cell_fractions() {
+        assert_eq!(covered_area('\u{2588}'), Some(1.0)); // █ full
+        assert_eq!(covered_area('\u{2580}'), Some(0.5)); // ▀ upper half
+        assert_eq!(covered_area('\u{2584}'), Some(0.5)); // ▄ lower half
+        assert_eq!(covered_area('\u{258C}'), Some(0.5)); // ▌ left half
+        assert_eq!(covered_area('\u{2590}'), Some(0.5)); // ▐ right half
+        assert_eq!(covered_area('\u{2596}'), Some(0.25)); // ▖ one quadrant
+        assert_eq!(covered_area('\u{259F}'), Some(0.75)); // ▟ three quadrants
+        assert_eq!(covered_area('\u{2581}'), Some(0.125)); // ▁ lower eighth
+
+        // ▀ specifically fills the top half so it tiles with the cell below.
+        let upper_half = block_element_fill('\u{2580}').unwrap();
+        assert_eq!(upper_half.count, 1);
+        assert_eq!(upper_half.rects[0], [0.0, 0.0, 1.0, 0.5]);
+
+        // Ordinary text, the dithered shades, and box drawing are left to the
+        // font shaper, since they are not exact rectangular fills.
+        assert!(block_element_fill('A').is_none());
+        assert!(block_element_fill(' ').is_none());
+        assert!(block_element_fill('\u{2591}').is_none()); // ░ light shade
+        assert!(block_element_fill('\u{2592}').is_none()); // ▒ medium shade
+        assert!(block_element_fill('\u{2593}').is_none()); // ▓ dark shade
+        assert!(block_element_fill('\u{2500}').is_none()); // ─ box drawing
+    }
+
+    #[test]
+    fn snap_cell_edge_is_exact_for_integer_cells() {
+        let cell = 29.0;
+        for index in 0..200 {
+            assert_eq!(snap_cell_edge(index as f32, cell), index as f32 * cell);
+        }
+    }
+
+    #[test]
+    fn snap_cell_edge_tiles_fractional_cells_without_gaps_or_overlap() {
+        // CellQuantization::Fractional leaves sub-pixel cell sizes. The snapped
+        // grid must still cover every pixel exactly once: each edge lands on a
+        // whole pixel, edges never go backwards, and adjacent cells abut (the
+        // right edge of one cell is the left edge of the next), so no base
+        // background can bleed through and no cell is painted twice.
+        for &cell in &[55.875_f32, 28.898, 9.6, 17.3333, 100.4999] {
+            let mut previous = snap_cell_edge(0.0, cell);
+            assert_eq!(previous, 0.0);
+            for index in 1..512 {
+                let edge = snap_cell_edge(index as f32, cell);
+                assert_eq!(edge, edge.round(), "edge must be a whole pixel");
+                let span = edge - previous;
+                assert!(
+                    span >= cell.floor() && span <= cell.ceil(),
+                    "cell {index} span {span} not within [{}, {}]",
+                    cell.floor(),
+                    cell.ceil(),
+                );
+                previous = edge;
+            }
+        }
+    }
 }

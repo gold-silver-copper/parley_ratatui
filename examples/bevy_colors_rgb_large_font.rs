@@ -1,0 +1,256 @@
+use std::time::{Duration, Instant};
+
+use bevy::app::AppExit;
+use bevy::ecs::message::MessageWriter;
+use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
+use palette::{Okhsv, Srgb, convert::FromColorUnclamped};
+use parley_ratatui::ratatui::Terminal;
+use parley_ratatui::ratatui::buffer::Buffer;
+use parley_ratatui::ratatui::layout::{Constraint, Layout, Position, Rect};
+use parley_ratatui::ratatui::style::Color;
+use parley_ratatui::ratatui::text::Text;
+use parley_ratatui::ratatui::widgets::Widget;
+use parley_ratatui::{FontOptions, ParleyBackend, PresentationScale, TerminalRenderer, Theme};
+
+#[path = "support/bevy_direct.rs"]
+mod bevy_direct;
+
+const GRID_COLUMNS: u16 = 80;
+const GRID_ROWS: u16 = 28;
+const FONT_SIZE: f32 = 24.0;
+
+struct TerminalTexture {
+    terminal: Terminal<ParleyBackend>,
+    terminal_app: ColorsRgbApp,
+    renderer: TerminalRenderer,
+    handle: Handle<Image>,
+}
+
+#[derive(Debug, Default)]
+struct ColorsRgbApp {
+    fps_widget: FpsWidget,
+    colors_widget: ColorsWidget,
+}
+
+#[derive(Debug)]
+struct FpsWidget {
+    frame_count: usize,
+    last_instant: Instant,
+    fps: Option<f32>,
+}
+
+#[derive(Debug, Default)]
+struct ColorsWidget {
+    colors: Vec<Vec<Color>>,
+    frame_count: usize,
+}
+
+fn main() {
+    App::new()
+        .add_plugins((
+            DefaultPlugins.set(ImagePlugin::default_linear()),
+            bevy_direct::DirectTerminalPlugin,
+        ))
+        .add_systems(Startup, setup)
+        .add_systems(Update, (update_terminal_texture, exit_on_key))
+        .run();
+}
+
+fn setup(world: &mut World) {
+    let primary_window = world
+        .query_filtered::<&Window, With<PrimaryWindow>>()
+        .single(world)
+        .expect("primary window");
+    let render_scale = render_scale_for_window(primary_window);
+    let terminal = Terminal::new(ParleyBackend::new(GRID_COLUMNS, GRID_ROWS)).expect("terminal");
+    let renderer =
+        TerminalRenderer::new_scaled(example_font_options(), Theme::default(), render_scale);
+    let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
+    let image =
+        bevy_direct::new_terminal_image(width, height, "parley_ratatui.bevy_colors_rgb_large_font");
+    let handle = world.resource_mut::<Assets<Image>>().add(image);
+
+    world.spawn(Camera2d);
+    let sprite_position = snapped_translation(Vec2::ZERO, render_scale);
+    world
+        .spawn(Sprite {
+            image: handle.clone(),
+            custom_size: Some(bevy_direct::texture_logical_size(
+                width,
+                height,
+                render_scale,
+            )),
+            ..default()
+        })
+        .insert(Transform::from_translation(sprite_position.extend(0.0)));
+
+    world.insert_non_send(TerminalTexture {
+        terminal,
+        terminal_app: ColorsRgbApp::default(),
+        renderer,
+        handle,
+    });
+}
+
+fn render_scale_for_window(window: &Window) -> f32 {
+    let logical_size = window.resolution.size().max(Vec2::ONE);
+    let physical_size = window.resolution.physical_size();
+    PresentationScale::new(
+        [logical_size.x, logical_size.y],
+        [physical_size.x, physical_size.y],
+        window.scale_factor(),
+        window.resolution.base_scale_factor(),
+    )
+    .render_scale()
+}
+
+fn snapped_translation(position: Vec2, render_scale: f32) -> Vec2 {
+    let [x, y] = parley_ratatui::snap_logical_position_to_physical_pixel(
+        [position.x, position.y],
+        render_scale,
+    );
+    Vec2::new(x, y)
+}
+
+fn example_font_options() -> FontOptions {
+    const TERMINAL_FAMILIES: &str = "Menlo, JetBrains Mono, FiraMono Nerd Font";
+
+    FontOptions {
+        size: FONT_SIZE,
+        ..FontOptions::default()
+    }
+    .with_regular_font(TERMINAL_FAMILIES)
+    .with_bold_font(TERMINAL_FAMILIES)
+    .with_italic_font(TERMINAL_FAMILIES)
+    .with_bold_italic_font(TERMINAL_FAMILIES)
+    .with_fallback_family("Apple Color Emoji, Noto Color Emoji")
+    .with_fallback_family("Noto Sans CJK JP, PingFang SC, Hiragino Sans")
+}
+
+fn update_terminal_texture(
+    exchange: Res<bevy_direct::DirectTerminalSceneExchange>,
+    mut terminal_texture: NonSendMut<TerminalTexture>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let TerminalTexture {
+        terminal,
+        terminal_app,
+        renderer,
+        handle,
+    } = &mut *terminal_texture;
+    terminal
+        .draw(|frame| frame.render_widget(terminal_app, frame.area()))
+        .expect("draw terminal");
+
+    let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
+    let mut image = images.get_mut(&*handle).expect("terminal image");
+    bevy_direct::resize_terminal_image(&mut image, width, height);
+
+    let cursor_position = terminal.backend().cursor_position();
+    let cursor_visible = terminal.backend().cursor_visible();
+    let buffer = terminal.backend().buffer();
+    bevy_direct::update_direct_terminal_frame(
+        &exchange,
+        handle.clone(),
+        renderer,
+        buffer,
+        Some(cursor_position),
+        cursor_visible,
+        0.0,
+    );
+}
+
+fn exit_on_key(keys: Res<ButtonInput<KeyCode>>, mut app_exit_writer: MessageWriter<AppExit>) {
+    if keys.just_pressed(KeyCode::KeyQ) || keys.just_pressed(KeyCode::Escape) {
+        app_exit_writer.write(AppExit::Success);
+    }
+}
+
+impl Widget for &mut ColorsRgbApp {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        use Constraint::{Length, Min};
+
+        let [top, colors] = Layout::vertical([Length(1), Min(0)]).areas(area);
+        let [title, fps] = Layout::horizontal([Min(0), Length(8)]).areas(top);
+        Text::from("colors_rgb large font in Bevy texture. Press q or Esc to quit")
+            .centered()
+            .render(title, buf);
+        self.fps_widget.render(fps, buf);
+        self.colors_widget.render(colors, buf);
+    }
+}
+
+impl Default for FpsWidget {
+    fn default() -> Self {
+        Self {
+            frame_count: 0,
+            last_instant: Instant::now(),
+            fps: None,
+        }
+    }
+}
+
+impl Widget for &mut FpsWidget {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.calculate_fps();
+        if let Some(fps) = self.fps {
+            Text::from(format!("{fps:.1} fps")).render(area, buf);
+        }
+    }
+}
+
+impl FpsWidget {
+    fn calculate_fps(&mut self) {
+        self.frame_count += 1;
+        let elapsed = self.last_instant.elapsed();
+        if elapsed > Duration::from_secs(1) && self.frame_count > 2 {
+            self.fps = Some(self.frame_count as f32 / elapsed.as_secs_f32());
+            self.frame_count = 0;
+            self.last_instant = Instant::now();
+        }
+    }
+}
+
+impl Widget for &mut ColorsWidget {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.setup_colors(area);
+        let colors = &self.colors;
+        for (xi, x) in (area.left()..area.right()).enumerate() {
+            let xi = (xi + self.frame_count) % (area.width as usize);
+            for (yi, y) in (area.top()..area.bottom()).enumerate() {
+                let fg = colors[yi * 2][xi];
+                let bg = colors[yi * 2 + 1][xi];
+                buf[Position::new(x, y)].set_char('▀').set_fg(fg).set_bg(bg);
+            }
+        }
+        self.frame_count += 1;
+    }
+}
+
+impl ColorsWidget {
+    fn setup_colors(&mut self, size: Rect) {
+        let Rect { width, height, .. } = size;
+        let height = height as usize * 2;
+        let width = width as usize;
+        if self.colors.len() == height && self.colors.first().is_some_and(|row| row.len() == width)
+        {
+            return;
+        }
+
+        self.colors = Vec::with_capacity(height);
+        for y in 0..height {
+            let mut row = Vec::with_capacity(width);
+            for x in 0..width {
+                let hue = x as f32 * 360.0 / width as f32;
+                let value = (height - y) as f32 / height as f32;
+                let saturation = Okhsv::max_saturation();
+                let color = Okhsv::new(hue, saturation, value);
+                let color = Srgb::<f32>::from_color_unclamped(color);
+                let color: Srgb<u8> = color.into_format();
+                row.push(Color::Rgb(color.red, color.green, color.blue));
+            }
+            self.colors.push(row);
+        }
+    }
+}
