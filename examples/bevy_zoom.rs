@@ -1,3 +1,4 @@
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowResized};
@@ -7,7 +8,7 @@ use parley_ratatui::ratatui::style::{Color, Modifier, Style};
 use parley_ratatui::ratatui::text::{Line, Span};
 use parley_ratatui::ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Widget};
 use parley_ratatui::{
-    FontOptions, ParleyBackend, PresentationScale, TerminalRenderer, TexturePresentation, Theme,
+    CellQuantization, FontOptions, ParleyBackend, TerminalRenderer, TexturePresentation, Theme,
 };
 
 #[path = "support/bevy_direct.rs"]
@@ -102,7 +103,7 @@ fn setup(world: &mut World) {
         .query_filtered::<&Window, With<PrimaryWindow>>()
         .single(world)
         .expect("primary window");
-    let render_scale = render_scale_for_window(primary_window);
+    let render_scale = bevy_direct::render_scale_for_window(primary_window);
     let logical_size = primary_window.resolution.size();
 
     let mut terminal = Terminal::new(ParleyBackend::new(1, 1)).expect("terminal");
@@ -120,14 +121,20 @@ fn setup(world: &mut World) {
     let handle = world.resource_mut::<Assets<Image>>().add(image);
 
     world.spawn(Camera2d);
-    let sprite_position = snapped_translation(Vec2::ZERO, render_scale);
+    // Present the terminal texture with a fullscreen quad that fetches each texel
+    // by physical pixel coordinate (1:1, no resampling), rather than a sprite.
+    let present_mesh = world
+        .resource_mut::<Assets<Mesh>>()
+        .add(bevy_direct::present_quad());
+    let present_material = world
+        .resource_mut::<Assets<bevy_direct::TerminalPresentMaterial>>()
+        .add(bevy_direct::TerminalPresentMaterial {
+            texture: handle.clone(),
+        });
     world.spawn((
-        Sprite {
-            image: handle.clone(),
-            custom_size: Some(texture_logical_size(grid, render_scale)),
-            ..default()
-        },
-        Transform::from_translation(sprite_position.extend(0.0)),
+        Mesh2d(present_mesh),
+        MeshMaterial2d(present_material),
+        NoFrustumCulling,
         TerminalSprite,
     ));
 
@@ -144,7 +151,6 @@ fn keyboard_zoom(
     keyboard: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut terminal_texture: NonSendMut<TerminalTexture>,
-    mut sprite: Query<(&mut Sprite, &mut Transform), With<TerminalSprite>>,
 ) {
     let zoom_in =
         keyboard.just_pressed(KeyCode::Equal) || keyboard.just_pressed(KeyCode::NumpadAdd);
@@ -163,7 +169,7 @@ fn keyboard_zoom(
 
     terminal_texture.font_size = font_size;
     let window = windows.single().expect("primary window");
-    let render_scale = render_scale_for_window(window);
+    let render_scale = bevy_direct::render_scale_for_window(window);
     terminal_texture.renderer = TerminalRenderer::new_scaled(
         example_font_options(font_size),
         Theme::default(),
@@ -171,20 +177,18 @@ fn keyboard_zoom(
     );
 
     let logical_size = window.resolution.size();
-    let grid = resize_terminal_to_fit(
+    let _ = resize_terminal_to_fit(
         &mut terminal_texture.terminal,
         &terminal_texture.renderer,
         logical_size,
         render_scale,
     );
-    sync_sprite_size(&mut sprite, grid, render_scale);
 }
 
 fn resize_terminal(
     mut events: MessageReader<WindowResized>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut terminal_texture: NonSendMut<TerminalTexture>,
-    mut sprite: Query<(&mut Sprite, &mut Transform), With<TerminalSprite>>,
 ) {
     if events.read().next().is_none() {
         return;
@@ -192,26 +196,27 @@ fn resize_terminal(
 
     let window = windows.single().expect("primary window");
     let logical_size = window.resolution.size();
-    let render_scale = render_scale_for_window(window);
+    let render_scale = bevy_direct::render_scale_for_window(window);
     let terminal_texture = &mut *terminal_texture;
     terminal_texture.renderer = TerminalRenderer::new_scaled(
         example_font_options(terminal_texture.font_size),
         Theme::default(),
         render_scale,
     );
-    let grid = resize_terminal_to_fit(
+    let _ = resize_terminal_to_fit(
         &mut terminal_texture.terminal,
         &terminal_texture.renderer,
         logical_size,
         render_scale,
     );
-    sync_sprite_size(&mut sprite, grid, render_scale);
 }
 
 fn update_terminal_texture(
     exchange: Res<bevy_direct::DirectTerminalSceneExchange>,
     mut terminal_texture: NonSendMut<TerminalTexture>,
     mut images: ResMut<Assets<Image>>,
+    mut present_materials: ResMut<Assets<bevy_direct::TerminalPresentMaterial>>,
+    present_query: Query<&MeshMaterial2d<bevy_direct::TerminalPresentMaterial>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
 ) {
@@ -228,7 +233,7 @@ fn update_terminal_texture(
     let area = terminal.backend().buffer().area;
     let (width, height) = renderer.texture_size_for_buffer(terminal.backend().buffer());
     let metrics = renderer.metrics();
-    let render_scale = render_scale_for_window(window);
+    let render_scale = bevy_direct::render_scale_for_window(window);
     let grid = TerminalGrid {
         columns: area.width,
         rows: area.height,
@@ -259,6 +264,17 @@ fn update_terminal_texture(
 
     let mut image = images.get_mut(&*handle).expect("terminal image");
     bevy_direct::resize_terminal_image(&mut image, width, height);
+
+    // The texture's GpuImage is recreated when it resizes (font zoom / window
+    // resize), which invalidates the present material's cached bind group. Writing
+    // the texture handle (not merely touching the asset) advances the material's
+    // change tick so Bevy re-prepares the bind group against the current GpuImage;
+    // a no-op `get_mut` is not enough and leaves the quad sampling a stale texture.
+    for present in &present_query {
+        if let Some(mut material) = present_materials.get_mut(&present.0) {
+            material.texture = handle.clone();
+        }
+    }
 
     let cursor_position = terminal.backend().cursor_position();
     let cursor_visible = terminal.backend().cursor_visible();
@@ -304,44 +320,6 @@ fn resize_terminal_to_fit(
     }
 }
 
-fn sync_sprite_size(
-    sprite: &mut Query<(&mut Sprite, &mut Transform), With<TerminalSprite>>,
-    grid: TerminalGrid,
-    render_scale: f32,
-) {
-    let (mut sprite, mut transform) = sprite.single_mut().expect("terminal sprite");
-    sprite.custom_size = Some(texture_logical_size(grid, render_scale));
-    transform.translation = snapped_translation(transform.translation.truncate(), render_scale)
-        .extend(transform.translation.z);
-}
-
-fn texture_logical_size(grid: TerminalGrid, render_scale: f32) -> Vec2 {
-    let [width, height] =
-        TexturePresentation::new([grid.texture_width, grid.texture_height], render_scale)
-            .logical_size();
-    Vec2::new(width, height)
-}
-
-fn render_scale_for_window(window: &Window) -> f32 {
-    let logical_size = window.resolution.size().max(Vec2::ONE);
-    let physical_size = window.resolution.physical_size();
-    PresentationScale::new(
-        [logical_size.x, logical_size.y],
-        [physical_size.x, physical_size.y],
-        window.scale_factor(),
-        window.resolution.base_scale_factor(),
-    )
-    .render_scale()
-}
-
-fn snapped_translation(position: Vec2, render_scale: f32) -> Vec2 {
-    let [x, y] = parley_ratatui::snap_logical_position_to_physical_pixel(
-        [position.x, position.y],
-        render_scale,
-    );
-    Vec2::new(x, y)
-}
-
 fn example_font_options(size: f32) -> FontOptions {
     const TERMINAL_FAMILIES: &str = "Menlo, JetBrains Mono, FiraMono Nerd Font";
 
@@ -355,6 +333,11 @@ fn example_font_options(size: f32) -> FontOptions {
     .with_bold_italic_font(TERMINAL_FAMILIES)
     .with_fallback_family("Apple Color Emoji, Noto Color Emoji")
     .with_fallback_family("Noto Sans CJK JP, PingFang SC, Hiragino Sans")
+    // Keep exact fractional cell sizes so both axes scale proportionally on every
+    // font-size step. With the default `Round`, a sub-pixel advance delta can leave
+    // the cell width unchanged while the height grows — a vertical-only stretch that
+    // is especially visible on low-DPI monitors (small physical cells round harder).
+    .with_cell_quantization(CellQuantization::Fractional)
 }
 
 struct TerminalDemo {

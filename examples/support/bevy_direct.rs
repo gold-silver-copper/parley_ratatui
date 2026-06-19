@@ -1,23 +1,40 @@
 use std::sync::{Arc, Mutex};
 
-use bevy::asset::RenderAssetUsages;
+use bevy::asset::{RenderAssetUsages, load_internal_asset, uuid_handle};
 use bevy::image::ImageSampler;
+use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology, VertexBufferLayout};
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssets;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
+use bevy::render::render_resource::{
+    AsBindGroup, BlendState, Extent3d, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    TextureDimension, TextureFormat, TextureUsages, VertexFormat, VertexStepMode,
+};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
 use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderSystems};
+use bevy::shader::{Shader, ShaderRef};
+use bevy::sprite_render::{Material2d, Material2dKey, Material2dPlugin};
 use parley_ratatui::ratatui::buffer::Buffer;
 use parley_ratatui::ratatui::layout::Position;
 use parley_ratatui::vello::Scene;
 use parley_ratatui::vello::peniko::Color as PenikoColor;
 use parley_ratatui::{GpuRenderer, TerminalRenderer, TexturePresentation};
 
+/// Handle for the embedded 1:1 terminal-present shader.
+const TERMINAL_PRESENT_SHADER: Handle<Shader> =
+    uuid_handle!("b2c4e6a8-1357-4f9b-8d2e-3a5c7e9b1d4f");
+
 pub struct DirectTerminalPlugin;
 
 impl Plugin for DirectTerminalPlugin {
     fn build(&self, app: &mut App) {
+        load_internal_asset!(
+            app,
+            TERMINAL_PRESENT_SHADER,
+            "terminal_present.wgsl",
+            Shader::from_wgsl
+        );
+        app.add_plugins(Material2dPlugin::<TerminalPresentMaterial>::default());
         app.init_resource::<DirectTerminalSceneExchange>();
         let exchange = app
             .world()
@@ -33,6 +50,77 @@ impl Plugin for DirectTerminalPlugin {
         render_app.add_systems(ExtractSchedule, extract_terminal_frame);
         render_app.add_systems(Render, render_terminal_frame.in_set(RenderSystems::Prepare));
     }
+}
+
+/// Material that presents the terminal texture 1:1 with physical pixels.
+///
+/// A fullscreen quad whose fragment shader fetches each texel by physical pixel
+/// coordinate (`textureLoad`) — an identity sample with no resampling, the crisp
+/// presentation pattern from linebender/bevy_vello. Sampled via `textureLoad`, so
+/// no sampler binding is needed.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct TerminalPresentMaterial {
+    /// The terminal texture (a Vello-rendered `Rgba8Unorm` storage texture).
+    #[texture(0)]
+    pub texture: Handle<Image>,
+}
+
+impl Material2d for TerminalPresentMaterial {
+    fn vertex_shader() -> ShaderRef {
+        TERMINAL_PRESENT_SHADER.into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        TERMINAL_PRESENT_SHADER.into()
+    }
+
+    fn specialize(
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: Material2dKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // Alpha-blend so the area outside the terminal shows the camera clear.
+        if let Some(fragment) = descriptor.fragment.as_mut()
+            && let Some(Some(target)) = fragment.targets.first_mut()
+        {
+            target.blend = Some(BlendState::ALPHA_BLENDING);
+        }
+        descriptor.vertex.buffers = vec![VertexBufferLayout::from_vertex_formats(
+            VertexStepMode::Vertex,
+            [VertexFormat::Float32x3],
+        )];
+        Ok(())
+    }
+}
+
+/// A clip-space triangle covering the whole viewport (positions only).
+#[allow(dead_code)]
+pub fn present_quad() -> Mesh {
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
+    );
+    mesh.insert_indices(Indices::U32(vec![0, 1, 2]));
+    mesh
+}
+
+/// The presenting window's physical/logical pixel ratio, so the terminal texture
+/// is rendered at exactly framebuffer resolution and presents 1:1.
+///
+/// Derived from the real physical size rather than the reported scale factor,
+/// which can leak a higher-DPI monitor's scale on a mixed-DPI setup and over-size
+/// the texture (forcing a resample).
+#[allow(dead_code)]
+pub fn render_scale_for_window(window: &Window) -> f32 {
+    let logical = window.resolution.size().max(Vec2::ONE);
+    let physical = window.resolution.physical_size().as_vec2();
+    (physical.x / logical.x)
+        .min(physical.y / logical.y)
+        .max(1.0)
 }
 
 pub struct DirectTerminalFrame {
